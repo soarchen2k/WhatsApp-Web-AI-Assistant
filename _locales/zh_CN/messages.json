@@ -75,6 +75,11 @@
   "warnNoMessages": { "message": "没有找到可分析的消息" },
   "notifyGenerating": { "message": "正在生成 AI 回复..." },
   "notifyGenerateSuccess": { "message": "AI 回复生成成功！" },
+  "notifyImagesAttached": {
+    "message": "已附带对话中的 $COUNT$ 张图片",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "warnImagesNotSupportedDeepSeek": { "message": "DeepSeek 目前还不支持图片理解，AI 回复将只基于文字内容" },
   "errorGenerateDefault": { "message": "生成 AI 回复失败" },
   "errorApiNotFound": { "message": "找不到 API 接口，请检查你的 API Key。" },
   "errorApiForbidden": { "message": "API 访问被拒绝，请检查你的 API Key 权限。" },
@@ -237,8 +242,8 @@
   "helpSupportedItem3": { "message": "✅ 单聊" },
   "helpSupportedItem4": { "message": "✅ 消息时间戳" },
   "helpSupportedItem5": { "message": "✅ 发送者识别" },
-  "helpSupportedItem6": { "message": "⚠️ 媒体消息（仅支持文本提取）" },
-  "helpSupportedItem7": { "message": "❌ 语音消息" },
+  "helpSupportedItem6": { "message": "⚠️ 最近的图片（仅限 Gemini——会把最近最多 3 张图片作为视觉上下文一起发送；DeepSeek 暂不支持）" },
+  "helpSupportedItem7": { "message": "❌ 视频和语音消息" },
   "helpSupportedItem8": { "message": "❌ 状态更新" },
 
   "helpTroubleshootingTitle": { "message": "🐛 常见问题排查" },
@@ -261,7 +266,7 @@
   "helpPrivacyTitle": { "message": "🔒 隐私与安全" },
   "helpPrivacyItem1": { "message": "消息的抓取、缓存与格式化都在浏览器本地完成" },
   "helpPrivacyItem2": { "message": "各服务商的 API Key 分别保存在 Chrome 的同步存储中，Gemini Key 只会发给 Google，DeepSeek Key 只会发给 DeepSeek" },
-  "helpPrivacyItem3": { "message": "当你点击生成 AI 回复时，完整的对话文本会被发送给你当前选择的服务商（Gemini 或 DeepSeek）——这并非纯本地处理，在用于真实客户对话前，请评估是否符合你的数据合规要求" },
+  "helpPrivacyItem3": { "message": "当你点击生成 AI 回复时，完整的对话文本——如果使用 Gemini，还包括最近最多 3 张图片——会被发送给你当前选择的服务商，这并非纯本地处理，在用于真实客户对话前，请评估是否符合你的数据合规要求" },
   "helpPrivacyItem4": { "message": "除了调用所选服务商的 API 之外，数据不会被存储在本插件以外的任何服务器上" },
   "helpPrivacyItem5": { "message": "插件仅在 web.whatsapp.com 上生效" },
 
@@ -269,6 +274,7 @@
   "helpVersion1": { "message": "<strong>v1.0</strong> - 首个版本，支持对话导出与 AI 回复生成" },
   "helpVersion2": { "message": "<strong>v1.1</strong> - 优化对话格式化，新增自定义指令弹窗" },
   "helpVersion3": { "message": "<strong>v1.2</strong> - 新增中英双语界面，并支持 DeepSeek 作为第二个 AI 服务商" },
+  "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini 现在可以看到对话中最近最多 3 张图片作为视觉上下文" },
 
   "helpSupportTitle": { "message": "📞 支持" },
   "helpSupportDesc": { "message": "如遇到问题、有建议或需要贡献代码，请查阅项目文档，或在项目仓库中提交 issue。" }

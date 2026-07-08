@@ -75,6 +75,11 @@
   "warnNoMessages": { "message": "No messages found to analyze" },
   "notifyGenerating": { "message": "Generating AI response..." },
   "notifyGenerateSuccess": { "message": "AI response generated successfully!" },
+  "notifyImagesAttached": {
+    "message": "Attached $COUNT$ image(s) from the conversation",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "warnImagesNotSupportedDeepSeek": { "message": "DeepSeek doesn't support image understanding yet — the reply will be based on text only" },
   "errorGenerateDefault": { "message": "Failed to generate AI response" },
   "errorApiNotFound": { "message": "API endpoint not found. Please check your API key." },
   "errorApiForbidden": { "message": "API access denied. Please verify your API key permissions." },
@@ -237,8 +242,8 @@
   "helpSupportedItem3": { "message": "✅ Individual chats" },
   "helpSupportedItem4": { "message": "✅ Message timestamps" },
   "helpSupportedItem5": { "message": "✅ Sender identification" },
-  "helpSupportedItem6": { "message": "⚠️ Media messages (text extraction only)" },
-  "helpSupportedItem7": { "message": "❌ Voice messages" },
+  "helpSupportedItem6": { "message": "⚠️ Recent images (Gemini only — up to 3 of the most recent images are sent as visual context; not supported with DeepSeek yet)" },
+  "helpSupportedItem7": { "message": "❌ Videos and voice messages" },
   "helpSupportedItem8": { "message": "❌ Status updates" },
 
   "helpTroubleshootingTitle": { "message": "🐛 Troubleshooting" },
@@ -261,7 +266,7 @@
   "helpPrivacyTitle": { "message": "🔒 Privacy & Security" },
   "helpPrivacyItem1": { "message": "Message capture, caching, and formatting all happen locally in your browser" },
   "helpPrivacyItem2": { "message": "Your API keys are stored in Chrome's sync storage and each is only ever sent to its own provider (Gemini key to Google, DeepSeek key to DeepSeek)" },
-  "helpPrivacyItem3": { "message": "When you request an AI response, the full conversation text is sent to whichever provider (Gemini or DeepSeek) you have selected — this is not purely local processing, so evaluate whether this fits your data compliance needs before using it with real customer conversations" },
+  "helpPrivacyItem3": { "message": "When you request an AI response, the full conversation text — plus up to 3 recent images if you're using Gemini — is sent to whichever provider you have selected; this is not purely local processing, so evaluate whether this fits your data compliance needs before using it with real customer conversations" },
   "helpPrivacyItem4": { "message": "No data is stored on any server other than your selected provider's, and only for the duration of the API call" },
   "helpPrivacyItem5": { "message": "The extension only runs on web.whatsapp.com" },
 
@@ -269,6 +274,7 @@
   "helpVersion1": { "message": "<strong>v1.0</strong> - Initial release with conversation export and AI response generation" },
   "helpVersion2": { "message": "<strong>v1.1</strong> - Improved conversation formatting and added an instructions dialog for AI responses" },
   "helpVersion3": { "message": "<strong>v1.2</strong> - Added bilingual (English/Chinese) UI and DeepSeek as a second AI provider" },
+  "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini can now see up to 3 recent images from the conversation as visual context" },
 
   "helpSupportTitle": { "message": "📞 Support" },
   "helpSupportDesc": { "message": "For issues, suggestions, or contributions, please check the extension's documentation or create an issue in the project repository." }

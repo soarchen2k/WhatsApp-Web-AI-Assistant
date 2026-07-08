@@ -885,12 +885,21 @@ class WhatsAppAI {
         return;
       }
 
+      const images = await this.extractRecentImages();
+      if (images.length > 0) {
+        if (this.aiProvider === 'deepseek') {
+          this.showNotification(t('warnImagesNotSupportedDeepSeek'), 'warning');
+        } else {
+          this.showNotification(t('notifyImagesAttached', [String(images.length)]), 'info');
+        }
+      }
+
       this.showNotification(t('notifyGenerating'), 'info');
 
       const conversationText = this.formatConversationForAI(messages, messageInstructions);
       console.log('Conversation to analyze:', conversationText);
 
-      const response = await this.callAI(conversationText);
+      const response = await this.callAI(conversationText, images);
 
       if (response) {
         this.displayAIResponse(response);
@@ -915,17 +924,22 @@ class WhatsAppAI {
     }
   }
 
-  async callAI(conversationText) {
+  async callAI(conversationText, images = []) {
     if (this.aiProvider === 'deepseek') {
+      // DeepSeek's API doesn't support image input yet, so images are ignored here
       return this.callDeepSeekAPI(conversationText);
     }
-    return this.callGeminiAPI(conversationText);
+    return this.callGeminiAPI(conversationText, images);
   }
 
-  buildUserPrompt(conversationText) {
+  buildUserPrompt(conversationText, imageCount = 0) {
+    const imageNote = imageCount > 0
+      ? `\n\n(${imageCount} image(s) from the recent conversation are attached below — use them as visual context if relevant.)`
+      : '';
+
     return `I'm providing you with a WhatsApp conversation. Please analyze the context and generate an appropriate response that would fit naturally as the next message in this conversation.
 
-${conversationText}
+${conversationText}${imageNote}
 
 Based on the conversation context above, generate a natural and appropriate response. Consider:
 - The tone and style of the conversation
@@ -934,6 +948,50 @@ Based on the conversation context above, generate a natural and appropriate resp
 - Any questions or topics that need addressing
 
 Your response:`;
+  }
+
+  async extractRecentImages(maxImages = 3) {
+    const chatContainer = this.getChatContainer();
+    if (!chatContainer) return [];
+
+    // Try selectors from most to least specific, matching the same fallback style
+    // used elsewhere in this file since WhatsApp's DOM structure is undocumented
+    const selectors = [
+      '[data-testid="image-thumb"] img[src^="blob:"]',
+      'img[data-testid="image-thumb"][src^="blob:"]',
+      'img[src^="blob:"]'
+    ];
+
+    let imgElements = [];
+    for (const selector of selectors) {
+      imgElements = Array.from(chatContainer.querySelectorAll(selector));
+      if (imgElements.length > 0) break;
+    }
+
+    const recentImages = imgElements.slice(-maxImages);
+    const attachments = [];
+
+    for (const img of recentImages) {
+      try {
+        const response = await fetch(img.src);
+        const blob = await response.blob();
+        const data = await this.blobToBase64(blob);
+        attachments.push({ mimeType: blob.type || 'image/jpeg', data });
+      } catch (error) {
+        console.error('Failed to read image for AI attachment:', error);
+      }
+    }
+
+    return attachments;
+  }
+
+  blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
 
   async callDeepSeekAPI(conversationText) {
@@ -981,9 +1039,16 @@ Your response:`;
     }
   }
 
-  async callGeminiAPI(conversationText) {
+  async callGeminiAPI(conversationText, images = []) {
     const systemPrompt = this.systemInstructions || t('defaultSystemInstructions');
-    const prompt = `${systemPrompt}\n\n${this.buildUserPrompt(conversationText)}`;
+    const prompt = `${systemPrompt}\n\n${this.buildUserPrompt(conversationText, images.length)}`;
+
+    const parts = [
+      { text: prompt },
+      ...images.map(image => ({
+        inline_data: { mime_type: image.mimeType, data: image.data }
+      }))
+    ];
 
     try {
       // Updated API endpoint - using the correct v1 endpoint
@@ -994,9 +1059,7 @@ Your response:`;
         },
         body: JSON.stringify({
           contents: [{
-            parts: [{
-              text: prompt
-            }]
+            parts: parts
           }],
           generationConfig: {
             temperature: 0.7,
