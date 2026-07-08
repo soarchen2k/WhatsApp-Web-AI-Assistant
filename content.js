@@ -5,6 +5,11 @@ if (window.whatsappAILoaded) {
 } else {
   window.whatsappAILoaded = true;
 
+// Shorthand for chrome.i18n.getMessage with a fallback to the key itself
+function t(key, subs) {
+  return chrome.i18n.getMessage(key, subs) || key;
+}
+
 class WhatsAppAI {
   constructor() {
     this.messages = [];
@@ -20,7 +25,7 @@ class WhatsAppAI {
     // Get API key and system instructions from storage
     const result = await chrome.storage.sync.get(['geminiApiKey', 'systemInstructions']);
     this.apiKey = result.geminiApiKey || '';
-    this.systemInstructions = result.systemInstructions || 'You are a helpful AI assistant that generates appropriate responses for WhatsApp conversations. Keep responses natural, conversational, and contextually relevant.';
+    this.systemInstructions = result.systemInstructions || t('defaultSystemInstructions');
     
     // Initialize chat tracking
     this.initializeChatTracking();
@@ -157,23 +162,23 @@ class WhatsAppAI {
       
       // Create floating action button with cache status
       const cacheSize = this.messageCache.size;
-      const cacheStatus = cacheSize > 0 ? ` (${cacheSize} cached)` : '';
-      
+      const fabTitle = cacheSize > 0 ? t('fabTitleCached', [String(cacheSize)]) : t('fabTitle');
+
       const fab = document.createElement('div');
       fab.id = 'whatsapp-ai-fab';
       fab.innerHTML = `
-        <div class="ai-fab-button" title="AI Assistant${cacheStatus}">
+        <div class="ai-fab-button" title="${fabTitle}">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
           </svg>
           ${cacheSize > 0 ? `<div class="cache-indicator">${cacheSize}</div>` : ''}
         </div>
         <div class="ai-menu" id="ai-menu" style="display: none;">
-          <button id="export-conversation">📤 Export Conversation</button>
-          <button id="generate-response">🤖 Generate AI Response</button>
-          <button id="load-full-history">📜 Load Full History</button>
-          <button id="clear-cache">🗑️ Clear Cache</button>
-          <button id="settings">⚙️ Settings</button>
+          <button id="export-conversation">${t('menuExport')}</button>
+          <button id="generate-response">${t('menuGenerate')}</button>
+          <button id="load-full-history">${t('menuLoadHistory')}</button>
+          <button id="clear-cache">${t('menuClearCache')}</button>
+          <button id="settings">${t('menuSettings')}</button>
         </div>
       `;    document.body.appendChild(fab);
 
@@ -194,7 +199,7 @@ class WhatsAppAI {
       if (settingsBtn) settingsBtn.addEventListener('click', this.openSettings.bind(this));
       
       console.log('WhatsApp AI: UI setup complete');
-      this.showNotification('WhatsApp AI Assistant activated!', 'success');
+      this.showNotification(t('notifyActivated'), 'success');
     } catch (error) {
       console.error('WhatsApp AI: Error setting up event listeners:', error);
     }
@@ -416,12 +421,12 @@ class WhatsAppAI {
         indicator.textContent = cacheSize;
         fab.appendChild(indicator);
       }
-      fab.title = `AI Assistant (${cacheSize} cached messages)`;
+      fab.title = t('fabTitleCachedMessages', [String(cacheSize)]);
     } else {
       if (existingIndicator) {
         existingIndicator.remove();
       }
-      fab.title = 'AI Assistant';
+      fab.title = t('fabTitle');
     }
   }
 
@@ -458,7 +463,7 @@ class WhatsAppAI {
     const maxNoChangeAttempts = 3;
     
     console.log('Starting comprehensive message loading...');
-    this.showNotification('Loading full conversation history...', 'info');
+    this.showNotification(t('notifyLoadingHistory'), 'info');
 
     // Start from current position and work our way up
     const initialScrollTop = chatContainer.scrollTop;
@@ -494,7 +499,7 @@ class WhatsAppAI {
       
       if (newMessagesLoaded > 0) {
         consecutiveNoChangeAttempts = 0; // Reset counter when we find new messages
-        this.showNotification(`Loading... ${currentCacheSize} messages found`, 'info');
+        this.showNotification(t('notifyLoadingProgress', [String(currentCacheSize)]), 'info');
       } else {
         consecutiveNoChangeAttempts++;
         console.log(`No new messages found. Consecutive no-change attempts: ${consecutiveNoChangeAttempts}`);
@@ -523,7 +528,7 @@ class WhatsAppAI {
     
     const finalCount = this.messageCache.size;
     console.log(`Finished comprehensive loading. Total messages cached: ${finalCount}`);
-    this.showNotification(`Loaded ${finalCount} messages from conversation`, 'success');
+    this.showNotification(t('notifyLoadedMessages', [String(finalCount)]), 'success');
     
     // Update the UI to show new cache count
     this.updateCacheIndicator();
@@ -670,14 +675,14 @@ class WhatsAppAI {
 
   async loadFullHistory() {
     try {
-      this.showNotification('Loading full conversation history...', 'info');
+      this.showNotification(t('notifyLoadingHistory'), 'info');
       await this.loadAllMessages();
-      
+
       const totalMessages = this.messageCache.size;
-      this.showNotification(`Loaded ${totalMessages} messages. Cache updated with full conversation history.`, 'success');
+      this.showNotification(t('notifyLoadedHistoryDone', [String(totalMessages)]), 'success');
     } catch (error) {
       console.error('Error loading full history:', error);
-      this.showNotification('Failed to load full conversation history', 'error');
+      this.showNotification(t('errorLoadHistory'), 'error');
     }
   }
 
@@ -687,10 +692,10 @@ class WhatsAppAI {
       const cacheKey = `whatsapp_messages_${this.chatId}`;
       await chrome.storage.local.remove([cacheKey]);
       this.updateCacheIndicator(); // Update UI
-      this.showNotification('Message cache cleared', 'success');
+      this.showNotification(t('notifyCacheCleared'), 'success');
     } catch (error) {
       console.error('Error clearing cache:', error);
-      this.showNotification('Failed to clear cache', 'error');
+      this.showNotification(t('errorClearCache'), 'error');
     }
   }
 
@@ -750,7 +755,7 @@ class WhatsAppAI {
 
   async exportConversation() {
     try {
-      this.showNotification('Collecting conversation messages...', 'info');
+      this.showNotification(t('notifyCollectingMessages'), 'info');
       
       const messages = await this.extractMessages(true); // Pass true for full export
       const formattedConversation = this.formatConversationForAI(messages, true); // Pass true for export format
@@ -766,10 +771,10 @@ class WhatsAppAI {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       
-      this.showNotification(`Conversation exported successfully! (${messages.length} messages)`, 'success');
+      this.showNotification(t('notifyExportSuccess', [String(messages.length)]), 'success');
     } catch (error) {
       console.error('Export error:', error);
-      this.showNotification('Failed to export conversation', 'error');
+      this.showNotification(t('errorExport'), 'error');
     }
   }
 
@@ -781,12 +786,12 @@ class WhatsAppAI {
       modal.id = 'instructions-modal';
       modal.innerHTML = `
         <div class="ai-modal-content">
-          <h3>Instructions for Next Message</h3>
-          <p>Provide specific instructions for how the AI should respond to this conversation (optional):</p>
-          <textarea id="message-instructions" placeholder="Example: Be more formal, focus on technical details, be encouraging, etc." rows="4"></textarea>
+          <h3>${t('instructionsTitle')}</h3>
+          <p>${t('instructionsDesc')}</p>
+          <textarea id="message-instructions" placeholder="${t('instructionsPlaceholder')}" rows="4"></textarea>
           <div class="ai-modal-buttons">
-            <button id="skip-instructions" class="ai-button secondary">Skip</button>
-            <button id="apply-instructions" class="ai-button primary">Apply Instructions</button>
+            <button id="skip-instructions" class="ai-button secondary">${t('btnSkip')}</button>
+            <button id="apply-instructions" class="ai-button primary">${t('btnApplyInstructions')}</button>
           </div>
         </div>
       `;
@@ -834,14 +839,14 @@ class WhatsAppAI {
 
   async generateResponse() {
     if (!this.apiKey || this.apiKey.trim() === '') {
-      this.showNotification('Please set your Gemini API key in settings', 'error');
+      this.showNotification(t('errorNoApiKey'), 'error');
       this.openSettings();
       return;
     }
 
     // Basic API key format validation
     if (!this.apiKey.startsWith('AIza')) {
-      this.showNotification('Invalid API key format. Please check your Gemini API key.', 'error');
+      this.showNotification(t('errorInvalidApiKeyFormat'), 'error');
       this.openSettings();
       return;
     }
@@ -849,48 +854,48 @@ class WhatsAppAI {
     try {
       // Show instructions dialog first
       const messageInstructions = await this.showInstructionsDialog();
-      
-      this.showNotification('Analyzing conversation...', 'info');
-      
+
+      this.showNotification(t('notifyAnalyzing'), 'info');
+
       const messages = await this.extractMessages();
-      
+
       if (messages.length === 0) {
-        this.showNotification('No messages found to analyze', 'warning');
+        this.showNotification(t('warnNoMessages'), 'warning');
         return;
       }
-      
-      this.showNotification('Generating AI response...', 'info');
-      
+
+      this.showNotification(t('notifyGenerating'), 'info');
+
       const conversationText = this.formatConversationForAI(messages, messageInstructions);
       console.log('Conversation to analyze:', conversationText);
-      
+
       const response = await this.callGeminiAPI(conversationText);
-      
+
       if (response) {
         this.displayAIResponse(response);
-        this.showNotification('AI response generated successfully!', 'success');
+        this.showNotification(t('notifyGenerateSuccess'), 'success');
       }
     } catch (error) {
       console.error('AI generation error:', error);
-      
-      let errorMessage = 'Failed to generate AI response';
-      
+
+      let errorMessage = t('errorGenerateDefault');
+
       if (error.message.includes('404')) {
-        errorMessage = 'API endpoint not found. Please check your API key.';
+        errorMessage = t('errorApiNotFound');
       } else if (error.message.includes('403')) {
-        errorMessage = 'API access denied. Please verify your API key permissions.';
+        errorMessage = t('errorApiForbidden');
       } else if (error.message.includes('429')) {
-        errorMessage = 'Rate limit exceeded. Please try again later.';
+        errorMessage = t('errorRateLimit');
       } else if (error.message.includes('API Error')) {
         errorMessage = error.message;
       }
-      
+
       this.showNotification(errorMessage, 'error');
     }
   }
 
   async callGeminiAPI(conversationText) {
-    const systemPrompt = this.systemInstructions || 'You are a helpful AI assistant that generates appropriate responses for WhatsApp conversations. Keep responses natural, conversational, and contextually relevant.';
+    const systemPrompt = this.systemInstructions || t('defaultSystemInstructions');
     
     const prompt = `${systemPrompt}
 
@@ -1006,21 +1011,24 @@ Your response:`;
     modal.innerHTML = `
       <div class="ai-modal-content">
         <div class="ai-modal-header">
-          <h3>AI Generated Response</h3>
+          <h3>${t('aiResponseTitle')}</h3>
           <button class="ai-modal-close">&times;</button>
         </div>
         <div class="ai-modal-body">
-          <textarea id="ai-response-text" readonly>${response}</textarea>
+          <textarea id="ai-response-text" readonly></textarea>
           <div class="ai-modal-actions">
-            <button id="copy-response">Copy to Clipboard</button>
-            <button id="insert-response">Insert into Chat</button>
+            <button id="copy-response">${t('btnCopyClipboard')}</button>
+            <button id="insert-response">${t('btnInsertChat')}</button>
           </div>
         </div>
       </div>
     `;
-    
+
     document.body.appendChild(modal);
-    
+
+    // Set via .value (not innerHTML) so AI-generated text can never be parsed as markup
+    modal.querySelector('#ai-response-text').value = response;
+
     // Add event listeners
     modal.querySelector('.ai-modal-close').addEventListener('click', () => {
       document.body.removeChild(modal);
@@ -1028,7 +1036,7 @@ Your response:`;
     
     document.getElementById('copy-response').addEventListener('click', () => {
       navigator.clipboard.writeText(response);
-      this.showNotification('Response copied to clipboard!', 'success');
+      this.showNotification(t('notifyCopied'), 'success');
     });
     
     document.getElementById('insert-response').addEventListener('click', () => {
@@ -1044,11 +1052,27 @@ Your response:`;
     
     if (messageInput) {
       messageInput.focus();
-      
+
       // Use different methods depending on the input type
       if (messageInput.contentEditable === 'true') {
-        messageInput.innerHTML = response;
-        
+        // Insert as text nodes (never parsed as HTML) so AI output can't inject markup/scripts
+        messageInput.innerHTML = '';
+        const lines = response.split('\n');
+        lines.forEach((line, index) => {
+          messageInput.appendChild(document.createTextNode(line));
+          if (index < lines.length - 1) {
+            messageInput.appendChild(document.createElement('br'));
+          }
+        });
+
+        // Move cursor to the end so the agent can keep typing/editing
+        const range = document.createRange();
+        const selection = window.getSelection();
+        range.selectNodeContents(messageInput);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
         // Trigger input event
         const event = new Event('input', { bubbles: true });
         messageInput.dispatchEvent(event);
@@ -1060,9 +1084,9 @@ Your response:`;
         messageInput.dispatchEvent(event);
       }
       
-      this.showNotification('Response inserted into chat input', 'success');
+      this.showNotification(t('notifyInserted'), 'success');
     } else {
-      this.showNotification('Could not find message input field', 'error');
+      this.showNotification(t('errorNoInputField'), 'error');
     }
   }
 
@@ -1073,54 +1097,54 @@ Your response:`;
     modal.innerHTML = `
       <div class="ai-modal-content">
         <div class="ai-modal-header">
-          <h3>AI Assistant Settings</h3>
+          <h3>${t('settingsTitle')}</h3>
           <button class="ai-modal-close">&times;</button>
         </div>
         <div class="ai-modal-body">
           <div class="setting-group">
-            <label for="gemini-api-key">Gemini API Key:</label>
-            <input type="password" id="gemini-api-key" placeholder="Enter your Gemini API key (starts with AIza...)" value="${this.apiKey}">
+            <label for="gemini-api-key">${t('labelApiKey')}</label>
+            <input type="password" id="gemini-api-key" placeholder="${t('placeholderApiKey')}" value="${this.apiKey}">
             <small>
-              1. Visit <a href="https://aistudio.google.com/app/apikey" target="_blank">Google AI Studio</a><br>
-              2. Click "Create API Key"<br>
-              3. Copy the key (starts with "AIza")<br>
-              4. Paste it above and save
+              ${t('apiKeyStep1')}<br>
+              ${t('apiKeyStep2')}<br>
+              ${t('apiKeyStep3')}<br>
+              ${t('apiKeyStep4')}
             </small>
           </div>
-          
+
           <div class="setting-group">
-            <label for="system-instructions">System Instructions:</label>
-            <textarea id="system-instructions" placeholder="Enter custom instructions for the AI..." rows="6">${this.systemInstructions}</textarea>
+            <label for="system-instructions">${t('labelSystemInstructions')}</label>
+            <textarea id="system-instructions" placeholder="${t('placeholderSystemInstructions')}" rows="6">${this.systemInstructions}</textarea>
             <small>
-              <strong>Instructions for the AI:</strong> Define how the AI should behave, its personality, tone, or specific guidelines.<br>
-              <strong>Examples:</strong><br>
-              • "Always respond in a friendly and professional manner"<br>
-              • "Keep responses brief and to the point"<br>
-              • "Act as a customer support agent for my business"<br>
-              • "Respond in Spanish and be very enthusiastic"
+              <strong>${t('systemInstructionsHelpTitle')}</strong> ${t('systemInstructionsHelpDesc')}<br>
+              <strong>${t('examplesTitle')}</strong><br>
+              • ${t('example1')}<br>
+              • ${t('example2')}<br>
+              • ${t('example3')}<br>
+              • ${t('example4')}
             </small>
           </div>
-          
+
           <div class="setting-group">
             <details>
-              <summary style="cursor: pointer; margin-bottom: 10px; font-weight: 500;">🎯 Preset Instructions (Click to expand)</summary>
+              <summary style="cursor: pointer; margin-bottom: 10px; font-weight: 500;">${t('presetSectionTitle')}</summary>
               <div class="preset-buttons">
-                <button type="button" class="preset-btn" data-preset="professional">👔 Professional</button>
-                <button type="button" class="preset-btn" data-preset="friendly">😊 Friendly</button>
-                <button type="button" class="preset-btn" data-preset="brief">⚡ Brief</button>
-                <button type="button" class="preset-btn" data-preset="creative">🎨 Creative</button>
-                <button type="button" class="preset-btn" data-preset="support">🛠️ Support Agent</button>
-                <button type="button" class="preset-btn" data-preset="translator">🌐 Translator</button>
+                <button type="button" class="preset-btn" data-preset="professional">${t('presetProfessional')}</button>
+                <button type="button" class="preset-btn" data-preset="friendly">${t('presetFriendly')}</button>
+                <button type="button" class="preset-btn" data-preset="brief">${t('presetBrief')}</button>
+                <button type="button" class="preset-btn" data-preset="creative">${t('presetCreative')}</button>
+                <button type="button" class="preset-btn" data-preset="support">${t('presetSupport')}</button>
+                <button type="button" class="preset-btn" data-preset="translator">${t('presetTranslator')}</button>
               </div>
             </details>
           </div>
-          
+
           <div class="setting-group">
-            <label>Test API Connection:</label>
-            <button id="test-api" type="button" style="padding: 8px 16px; background: #17a2b8; color: white; border: none; border-radius: 4px; cursor: pointer;">Test Connection</button>
+            <label>${t('labelTestConnection')}</label>
+            <button id="test-api" type="button" style="padding: 8px 16px; background: #17a2b8; color: white; border: none; border-radius: 4px; cursor: pointer;">${t('btnTestConnection')}</button>
           </div>
           <div class="ai-modal-actions">
-            <button id="save-settings">Save Settings</button>
+            <button id="save-settings">${t('btnSaveSettings')}</button>
           </div>
         </div>
       </div>
@@ -1130,12 +1154,12 @@ Your response:`;
     
     // Preset instructions
     const presets = {
-      professional: "You are a professional AI assistant. Always respond in a formal, respectful, and business-appropriate manner. Use proper grammar and avoid casual language or emojis.",
-      friendly: "You are a friendly and warm AI assistant. Use a conversational tone, be approachable, and feel free to use appropriate emojis. Make responses feel personal and caring.",
-      brief: "You are a concise AI assistant. Always keep responses short, direct, and to the point. Avoid lengthy explanations unless specifically asked. Maximum 1-2 sentences per response.",
-      creative: "You are a creative and imaginative AI assistant. Feel free to be innovative, suggest unique ideas, and use creative language. Think outside the box and offer original perspectives.",
-      support: "You are a helpful customer support agent. Be patient, understanding, and solution-focused. Always try to resolve issues and provide clear, actionable guidance. Ask clarifying questions when needed.",
-      translator: "You are a helpful translation assistant. When someone writes in a language other than English, provide the translation and respond appropriately in their language. If they write in English, respond in English."
+      professional: t('presetProfessionalText'),
+      friendly: t('presetFriendlyText'),
+      brief: t('presetBriefText'),
+      creative: t('presetCreativeText'),
+      support: t('presetSupportText'),
+      translator: t('presetTranslatorText')
     };
     
     // Add event listeners for preset buttons
@@ -1163,12 +1187,12 @@ Your response:`;
     document.getElementById('test-api').addEventListener('click', async () => {
       const apiKey = document.getElementById('gemini-api-key').value;
       if (!apiKey) {
-        this.showNotification('Please enter an API key first', 'warning');
+        this.showNotification(t('warnEnterApiKeyFirst'), 'warning');
         return;
       }
-      
-      this.showNotification('Testing API connection...', 'info');
-      
+
+      this.showNotification(t('notifyTestingConnection'), 'info');
+
       try {
         const testResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
@@ -1177,36 +1201,36 @@ Your response:`;
             contents: [{ parts: [{ text: 'Hello, this is a test.' }] }]
           })
         });
-        
+
         if (testResponse.ok) {
-          this.showNotification('API connection successful!', 'success');
+          this.showNotification(t('notifyApiConnectionSuccess'), 'success');
         } else {
           const errorData = await testResponse.json().catch(() => ({}));
-          this.showNotification(`API test failed: ${errorData.error?.message || 'Invalid API key'}`, 'error');
+          this.showNotification(t('errorApiTestFailed', [errorData.error?.message || t('errorInvalidApiKeyGeneric')]), 'error');
         }
       } catch (error) {
-        this.showNotification('API test failed: Network error', 'error');
+        this.showNotification(t('errorApiTestNetwork'), 'error');
       }
     });
-    
+
     document.getElementById('save-settings').addEventListener('click', async () => {
       const apiKey = document.getElementById('gemini-api-key').value.trim();
       const systemInstructions = document.getElementById('system-instructions').value.trim();
-      
+
       if (apiKey && !apiKey.startsWith('AIza')) {
-        this.showNotification('Invalid API key format. Should start with "AIza"', 'error');
+        this.showNotification(t('errorInvalidApiKeyFormatSave'), 'error');
         return;
       }
-      
+
       this.apiKey = apiKey;
-      this.systemInstructions = systemInstructions || 'You are a helpful AI assistant that generates appropriate responses for WhatsApp conversations. Keep responses natural, conversational, and contextually relevant.';
-      
-      await chrome.storage.sync.set({ 
+      this.systemInstructions = systemInstructions || t('defaultSystemInstructions');
+
+      await chrome.storage.sync.set({
         geminiApiKey: apiKey,
         systemInstructions: this.systemInstructions
       });
-      
-      this.showNotification('Settings saved successfully!', 'success');
+
+      this.showNotification(t('notifySettingsSaved'), 'success');
       document.body.removeChild(modal);
     });
   }

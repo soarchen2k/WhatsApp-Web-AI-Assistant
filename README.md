@@ -1,5 +1,7 @@
 # WhatsApp Web AI Assistant
 
+English | [中文](README.zh-CN.md)
+
 A Chrome extension that enables you to export WhatsApp Web conversations and generate AI responses using Google's Gemini AI.
 
 ## Features
@@ -122,9 +124,15 @@ whatsapp-web-ai/
 ├── popup.html             # Extension popup interface
 ├── popup.js               # Popup functionality
 ├── background.js          # Service worker
-├── help.html              # Documentation page
-└── README.md              # This file
+├── help.html              # In-extension help page (localized via _locales)
+├── _locales/
+│   ├── en/messages.json    # English UI strings
+│   └── zh_CN/messages.json # Chinese (Simplified) UI strings
+├── README.md              # This file
+└── README.zh-CN.md        # Chinese version of this file
 ```
+
+The extension UI (popup, floating button, notifications, settings, and the help page) is localized using Chrome's `chrome.i18n` API and automatically follows your browser's display language (currently English and Chinese are supported).
 
 ## Development
 
