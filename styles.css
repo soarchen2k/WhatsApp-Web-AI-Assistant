@@ -304,6 +304,7 @@
 }
 
 .setting-group input,
+.setting-group select,
 .setting-group textarea {
   width: 100%;
   padding: 12px;
@@ -316,6 +317,7 @@
 }
 
 .setting-group input:focus,
+.setting-group select:focus,
 .setting-group textarea:focus {
   outline: none;
   border-color: #25d366;

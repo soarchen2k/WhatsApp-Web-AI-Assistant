@@ -15,6 +15,9 @@ class WhatsAppAI {
     this.messages = [];
     this.apiKey = '';
     this.systemInstructions = '';
+    this.aiProvider = 'gemini';
+    this.deepseekApiKey = '';
+    this.deepseekModel = 'deepseek-v4-flash';
     this.messageCache = new Map(); // Local cache for messages
     this.chatId = null; // Current chat identifier
     this.lastScrollPosition = 0;
@@ -23,10 +26,15 @@ class WhatsAppAI {
 
   async init() {
     // Get API key and system instructions from storage
-    const result = await chrome.storage.sync.get(['geminiApiKey', 'systemInstructions']);
+    const result = await chrome.storage.sync.get([
+      'geminiApiKey', 'systemInstructions', 'aiProvider', 'deepseekApiKey', 'deepseekModel'
+    ]);
     this.apiKey = result.geminiApiKey || '';
     this.systemInstructions = result.systemInstructions || t('defaultSystemInstructions');
-    
+    this.aiProvider = result.aiProvider || 'gemini';
+    this.deepseekApiKey = result.deepseekApiKey || '';
+    this.deepseekModel = result.deepseekModel || 'deepseek-v4-flash';
+
     // Initialize chat tracking
     this.initializeChatTracking();
     
@@ -838,17 +846,30 @@ class WhatsAppAI {
   }
 
   async generateResponse() {
-    if (!this.apiKey || this.apiKey.trim() === '') {
-      this.showNotification(t('errorNoApiKey'), 'error');
-      this.openSettings();
-      return;
-    }
+    if (this.aiProvider === 'deepseek') {
+      if (!this.deepseekApiKey || this.deepseekApiKey.trim() === '') {
+        this.showNotification(t('errorNoDeepSeekApiKey'), 'error');
+        this.openSettings();
+        return;
+      }
+      if (!this.deepseekApiKey.startsWith('sk-')) {
+        this.showNotification(t('errorInvalidDeepSeekApiKeyFormat'), 'error');
+        this.openSettings();
+        return;
+      }
+    } else {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.showNotification(t('errorNoApiKey'), 'error');
+        this.openSettings();
+        return;
+      }
 
-    // Basic API key format validation
-    if (!this.apiKey.startsWith('AIza')) {
-      this.showNotification(t('errorInvalidApiKeyFormat'), 'error');
-      this.openSettings();
-      return;
+      // Basic API key format validation
+      if (!this.apiKey.startsWith('AIza')) {
+        this.showNotification(t('errorInvalidApiKeyFormat'), 'error');
+        this.openSettings();
+        return;
+      }
     }
 
     try {
@@ -869,7 +890,7 @@ class WhatsAppAI {
       const conversationText = this.formatConversationForAI(messages, messageInstructions);
       console.log('Conversation to analyze:', conversationText);
 
-      const response = await this.callGeminiAPI(conversationText);
+      const response = await this.callAI(conversationText);
 
       if (response) {
         this.displayAIResponse(response);
@@ -894,12 +915,15 @@ class WhatsAppAI {
     }
   }
 
-  async callGeminiAPI(conversationText) {
-    const systemPrompt = this.systemInstructions || t('defaultSystemInstructions');
-    
-    const prompt = `${systemPrompt}
+  async callAI(conversationText) {
+    if (this.aiProvider === 'deepseek') {
+      return this.callDeepSeekAPI(conversationText);
+    }
+    return this.callGeminiAPI(conversationText);
+  }
 
-I'm providing you with a WhatsApp conversation. Please analyze the context and generate an appropriate response that would fit naturally as the next message in this conversation.
+  buildUserPrompt(conversationText) {
+    return `I'm providing you with a WhatsApp conversation. Please analyze the context and generate an appropriate response that would fit naturally as the next message in this conversation.
 
 ${conversationText}
 
@@ -910,6 +934,56 @@ Based on the conversation context above, generate a natural and appropriate resp
 - Any questions or topics that need addressing
 
 Your response:`;
+  }
+
+  async callDeepSeekAPI(conversationText) {
+    const systemPrompt = this.systemInstructions || t('defaultSystemInstructions');
+    const userPrompt = this.buildUserPrompt(conversationText);
+
+    try {
+      const response = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.deepseekApiKey}`
+        },
+        body: JSON.stringify({
+          model: this.deepseekModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 1024
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('API Error Details:', errorData);
+        throw new Error(`API Error: ${response.status} - ${errorData.error?.message || 'Unknown error'}`);
+      }
+
+      const data = await response.json();
+      console.log('DeepSeek API Response:', data);
+
+      const generatedText = data.choices?.[0]?.message?.content;
+
+      if (!generatedText || generatedText.trim() === '') {
+        console.error('No text found in response structure:', JSON.stringify(data, null, 2));
+        throw new Error('No text generated by AI');
+      }
+
+      return generatedText.trim();
+    } catch (error) {
+      console.error('DeepSeek API error:', error);
+      throw error;
+    }
+  }
+
+  async callGeminiAPI(conversationText) {
+    const systemPrompt = this.systemInstructions || t('defaultSystemInstructions');
+    const prompt = `${systemPrompt}\n\n${this.buildUserPrompt(conversationText)}`;
 
     try {
       // Updated API endpoint - using the correct v1 endpoint
@@ -1102,6 +1176,14 @@ Your response:`;
         </div>
         <div class="ai-modal-body">
           <div class="setting-group">
+            <label for="ai-provider">${t('labelProvider')}</label>
+            <select id="ai-provider">
+              <option value="gemini">${t('providerGemini')}</option>
+              <option value="deepseek">${t('providerDeepSeek')}</option>
+            </select>
+          </div>
+
+          <div class="setting-group" id="gemini-settings-group">
             <label for="gemini-api-key">${t('labelApiKey')}</label>
             <input type="password" id="gemini-api-key" placeholder="${t('placeholderApiKey')}" value="${this.apiKey}">
             <small>
@@ -1110,6 +1192,22 @@ Your response:`;
               ${t('apiKeyStep3')}<br>
               ${t('apiKeyStep4')}
             </small>
+          </div>
+
+          <div class="setting-group" id="deepseek-settings-group">
+            <label for="deepseek-api-key">${t('labelDeepSeekApiKey')}</label>
+            <input type="password" id="deepseek-api-key" placeholder="${t('placeholderDeepSeekApiKey')}" value="${this.deepseekApiKey}">
+            <small>
+              ${t('deepSeekApiKeyStep1')}<br>
+              ${t('deepSeekApiKeyStep2')}<br>
+              ${t('deepSeekApiKeyStep3')}<br>
+              ${t('deepSeekApiKeyStep4')}
+            </small>
+            <label for="deepseek-model" style="margin-top: 10px;">${t('labelDeepSeekModel')}</label>
+            <select id="deepseek-model">
+              <option value="deepseek-v4-flash">${t('modelDeepSeekFlash')}</option>
+              <option value="deepseek-v4-pro">${t('modelDeepSeekPro')}</option>
+            </select>
           </div>
 
           <div class="setting-group">
@@ -1151,7 +1249,23 @@ Your response:`;
     `;
     
     document.body.appendChild(modal);
-    
+
+    // Set the provider/model dropdowns to the currently saved values and
+    // show only the API key group that matches the selected provider
+    const providerSelect = modal.querySelector('#ai-provider');
+    const geminiGroup = modal.querySelector('#gemini-settings-group');
+    const deepseekGroup = modal.querySelector('#deepseek-settings-group');
+    providerSelect.value = this.aiProvider;
+    modal.querySelector('#deepseek-model').value = this.deepseekModel;
+
+    const toggleProviderGroups = () => {
+      const isDeepSeek = providerSelect.value === 'deepseek';
+      geminiGroup.style.display = isDeepSeek ? 'none' : 'block';
+      deepseekGroup.style.display = isDeepSeek ? 'block' : 'none';
+    };
+    toggleProviderGroups();
+    providerSelect.addEventListener('change', toggleProviderGroups);
+
     // Preset instructions
     const presets = {
       professional: t('presetProfessionalText'),
@@ -1185,7 +1299,11 @@ Your response:`;
     });
     
     document.getElementById('test-api').addEventListener('click', async () => {
-      const apiKey = document.getElementById('gemini-api-key').value;
+      const isDeepSeek = providerSelect.value === 'deepseek';
+      const apiKey = isDeepSeek
+        ? document.getElementById('deepseek-api-key').value
+        : document.getElementById('gemini-api-key').value;
+
       if (!apiKey) {
         this.showNotification(t('warnEnterApiKeyFirst'), 'warning');
         return;
@@ -1194,13 +1312,26 @@ Your response:`;
       this.showNotification(t('notifyTestingConnection'), 'info');
 
       try {
-        const testResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Hello, this is a test.' }] }]
-          })
-        });
+        const testResponse = isDeepSeek
+          ? await fetch('https://api.deepseek.com/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+              },
+              body: JSON.stringify({
+                model: document.getElementById('deepseek-model').value,
+                messages: [{ role: 'user', content: 'Hello, this is a test.' }],
+                max_tokens: 20
+              })
+            })
+          : await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Hello, this is a test.' }] }]
+              })
+            });
 
         if (testResponse.ok) {
           this.showNotification(t('notifyApiConnectionSuccess'), 'success');
@@ -1215,18 +1346,30 @@ Your response:`;
 
     document.getElementById('save-settings').addEventListener('click', async () => {
       const apiKey = document.getElementById('gemini-api-key').value.trim();
+      const deepseekApiKey = document.getElementById('deepseek-api-key').value.trim();
+      const deepseekModel = document.getElementById('deepseek-model').value;
       const systemInstructions = document.getElementById('system-instructions').value.trim();
 
       if (apiKey && !apiKey.startsWith('AIza')) {
         this.showNotification(t('errorInvalidApiKeyFormatSave'), 'error');
         return;
       }
+      if (deepseekApiKey && !deepseekApiKey.startsWith('sk-')) {
+        this.showNotification(t('errorInvalidDeepSeekApiKeyFormatSave'), 'error');
+        return;
+      }
 
       this.apiKey = apiKey;
+      this.deepseekApiKey = deepseekApiKey;
+      this.deepseekModel = deepseekModel;
+      this.aiProvider = providerSelect.value;
       this.systemInstructions = systemInstructions || t('defaultSystemInstructions');
 
       await chrome.storage.sync.set({
         geminiApiKey: apiKey,
+        deepseekApiKey: deepseekApiKey,
+        deepseekModel: deepseekModel,
+        aiProvider: this.aiProvider,
         systemInstructions: this.systemInstructions
       });
 
