@@ -28,6 +28,7 @@
     "url": "https://github.com/yourusername/whatsapp-web-ai/issues"
   },
   "homepage": "https://github.com/yourusername/whatsapp-web-ai#readme",
-  "devDependencies": {},
-  "dependencies": {}
+  "devDependencies": {
+    "@types/chrome": "^0.2.2"
+  }
 }
