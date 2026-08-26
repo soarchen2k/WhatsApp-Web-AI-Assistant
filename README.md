@@ -49,6 +49,8 @@ A Chrome extension that exports WhatsApp Web conversations and generates AI resp
    - **HTML Archive** downloads a ZIP containing `index.html` and its image/video files
    - **Word Document** downloads a `.docx` with images only; videos are excluded
 
+The exported file records both the selected date range and the timestamps of the first and last matching messages. If a selected day has no messages, the archive naturally begins with the next day that does.
+
 ### Generating AI Responses
 
 1. Make sure your API key is configured

@@ -22128,7 +22128,8 @@
             if (latestContainer) container = latestContainer;
             const beforeTop = container.scrollTop;
             const nearTopBefore = beforeTop <= Math.max(4, container.clientHeight * 0.01);
-            const scrollStep = Math.max(420, Math.floor(container.clientHeight * 0.78));
+            const scrollRatio = sync.range ? 0.5 : 0.78;
+            const scrollStep = Math.max(320, Math.floor(container.clientHeight * scrollRatio));
             const targetTop = nearTopBefore ? 0 : Math.max(0, beforeTop - scrollStep);
             const olderMessagesButton = nearTopBefore ? this.getOlderMessagesButton(container) : null;
             const canRequestPhoneHistory = olderMessagesButton && Date.now() - lastPhoneHistoryRequestAt >= 12e3;
@@ -22269,31 +22270,19 @@
         })[0] || this.getChatContainer();
       }
       getVisibleHistorySnapshot(container) {
-        const roots = Array.from(container.querySelectorAll(
-          '.message-in, .message-out, [data-testid="msg-container"], [data-testid^="conv-msg-"]'
-        ));
-        const uniqueRoots = [];
-        const seen = /* @__PURE__ */ new Set();
-        for (const node of roots) {
-          const root = node.closest('[data-id], [data-message-id], [data-msg-id], [data-testid^="conv-msg-"]') || node;
-          if (seen.has(root)) continue;
-          seen.add(root);
-          uniqueRoots.push(root);
-        }
-        const oldest = uniqueRoots[0] || null;
-        const oldestKey = oldest ? this.getHistoryElementKey(oldest) : "";
-        let timestamp = "";
-        for (const root of uniqueRoots) {
-          const preTextNode = root.matches("[data-pre-plain-text]") ? root : root.querySelector("[data-pre-plain-text]");
-          const preTextTimestamp = preTextNode?.getAttribute("data-pre-plain-text")?.match(/\[([^\]]+)\]/)?.[1] || "";
-          const candidate = preTextTimestamp || this.extractTimestamp(root);
-          if (!timestamp) timestamp = candidate;
-          if (this.getDatePart(candidate)) {
-            timestamp = candidate;
-            break;
-          }
-        }
-        return { oldestKey, oldestTimestamp: timestamp, visibleCount: uniqueRoots.length };
+        const visibleMessages = this.scanVisibleMessages().filter(
+          (message) => message.element instanceof Element && container.contains(message.element)
+        );
+        const datedMessages = visibleMessages.map((message) => ({
+          message,
+          timestamp: this.getRangeTimestamp(message.timestamp)
+        })).filter((entry) => entry.timestamp !== null).sort((a, b) => a.timestamp - b.timestamp);
+        const oldestMessage = datedMessages[0]?.message || visibleMessages[0] || null;
+        return {
+          oldestKey: oldestMessage?.element ? this.getHistoryElementKey(oldestMessage.element) : "",
+          oldestTimestamp: oldestMessage?.timestamp || "",
+          visibleCount: visibleMessages.length
+        };
       }
       getHistoryElementKey(element) {
         const stableId = this.getStableMessageId(element);
@@ -22615,10 +22604,19 @@
           if (messages.length === 0) {
             throw new Error(t("errorNoMessagesInRange"));
           }
+          const coverage = this.getMessageCoverage(messages);
+          if (selection.range && coverage) {
+            this.showNotification(t("notifyRangeCoverage", [
+              selection.range.startDate,
+              selection.range.endDate,
+              coverage.first.timestamp,
+              coverage.last.timestamp
+            ]), "info");
+          }
           if (selection.format === "html") {
-            await this.exportHtmlArchive(messages);
+            await this.exportHtmlArchive(messages, selection.range);
           } else {
-            await this.exportWordDocument(messages);
+            await this.exportWordDocument(messages, selection.range);
           }
           this.clearExportProgress();
           this.showNotification(t("notifyExportSuccess", [String(messages.length)]), "success");
@@ -22639,6 +22637,12 @@
         const last = [...messages].reverse().find((message) => this.parseTimestamp(message.timestamp) !== Number.MAX_SAFE_INTEGER);
         const range = first && last ? `${first.timestamp || t("historyDateUnknown")} \u2192 ${last.timestamp || t("historyDateUnknown")}` : t("historyDateUnknown");
         return { count: messages.length, range };
+      }
+      getMessageCoverage(messages) {
+        const dated = this.sortMessages(messages).filter(
+          (message) => this.getRangeTimestamp(message.timestamp) !== null
+        );
+        return dated.length > 0 ? { first: dated[0], last: dated.at(-1) } : null;
       }
       showExportFormatDialog() {
         return new Promise((resolve) => {
@@ -22729,11 +22733,12 @@
           document.body.appendChild(modal);
         });
       }
-      getExportFilePrefix() {
+      getExportFilePrefix(range = null) {
         const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || "conversation";
         const safeTitle = title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").slice(0, 80) || "conversation";
         const date = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-        return `whatsapp-${safeTitle}-${date}`;
+        const rangePart = range ? "-" + range.startDate + "-to-" + range.endDate : "";
+        return "whatsapp-" + safeTitle + rangePart + "-" + date;
       }
       downloadBlob(blob, filename) {
         const url = URL.createObjectURL(blob);
@@ -23092,9 +23097,11 @@
           '"': "&quot;"
         })[character]);
       }
-      createConversationHtml(messages, mediaByMessage) {
+      createConversationHtml(messages, mediaByMessage, range = null) {
         const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || "WhatsApp Conversation";
-        const messageHtml = messages.map((message) => {
+        const coverage = this.getMessageCoverage(messages);
+        const rangeSummary = range ? '<section class="export-range-summary"><div><strong>' + this.escapeHtml(t("exportSelectedRange")) + ":</strong> " + this.escapeHtml(range.startDate) + " \u2192 " + this.escapeHtml(range.endDate) + "</div><div><strong>" + this.escapeHtml(t("exportActualCoverage")) + ":</strong> " + this.escapeHtml(coverage?.first.timestamp || t("historyDateUnknown")) + " \u2192 " + this.escapeHtml(coverage?.last.timestamp || t("historyDateUnknown")) + "</div></section>" : "";
+        const messageHtml = rangeSummary + messages.map((message) => {
           const assets = mediaByMessage.get(this.createMessageId(message)) || [];
           const getAssetSource = (asset) => `media/${encodeURIComponent(asset.filename)}`;
           const renderMediaGroup = (role, videoExpected) => {
@@ -23143,6 +23150,7 @@
     body { background:#e5ddd5; color:#111; font:14px/1.45 Arial,sans-serif; margin:0; }
     main { max-width:900px; margin:0 auto; padding:24px; }
     header { background:#fff; border-radius:8px; margin-bottom:16px; padding:18px; }
+    .export-range-summary { background:#f4fff7; border:1px solid #bfe8cc; border-radius:8px; color:#315b40; margin-bottom:16px; padding:12px 14px; }
     .message { background:#fff; border-radius:8px; margin:8px 0; max-width:78%; padding:10px 12px; word-break:break-word; }
     .outgoing { background:#d9fdd3; margin-left:auto; } .incoming { margin-right:auto; }
     .meta { color:#667781; font-size:12px; margin-bottom:5px; } .media { display:grid; gap:8px; margin-top:8px; }
@@ -23157,14 +23165,14 @@
 <body><main><header><h1>${this.escapeHtml(title)}</h1><div>${this.escapeHtml(t("exportGeneratedOn"))}: ${this.escapeHtml((/* @__PURE__ */ new Date()).toLocaleString())}</div></header>${messageHtml}</main></body>
 </html>`;
       }
-      async exportHtmlArchive(messages) {
+      async exportHtmlArchive(messages, range = null) {
         this.showNotification(t("notifyPreparingMedia"), "info");
         const { assets, mediaByMessage, unavailableVideos } = await this.collectMediaAssets(messages, true);
         const zip = new import_jszip.default();
-        zip.file("index.html", this.createConversationHtml(messages, mediaByMessage));
+        zip.file("index.html", this.createConversationHtml(messages, mediaByMessage, range));
         assets.forEach((asset) => zip.file(`media/${asset.filename}`, asset.blob));
         const archive = await zip.generateAsync({ type: "blob", compression: "STORE" });
-        this.downloadBlob(archive, `${this.getExportFilePrefix()}.zip`);
+        this.downloadBlob(archive, this.getExportFilePrefix(range) + ".zip");
         if (unavailableVideos > 0) {
           this.showNotification(t("htmlVideoUnavailableSummary", [String(unavailableVideos)]), "info");
         }
@@ -23297,13 +23305,22 @@
           bytes: prepared.blob.size
         };
       }
-      async exportWordDocument(messages) {
+      async exportWordDocument(messages, range = null) {
         this.showExportProgress(t("wordExportPreparing"));
         const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || "WhatsApp Conversation";
         const children = [
           new Paragraph({ text: this.sanitizeWordText(title), heading: HeadingLevel.HEADING_1 }),
           new Paragraph({ text: `${t("exportGeneratedOn")}: ${(/* @__PURE__ */ new Date()).toLocaleString()}` })
         ];
+        if (range) {
+          const coverage = this.getMessageCoverage(messages);
+          children.push(
+            new Paragraph({ text: t("exportSelectedRange") + ": " + range.startDate + " \u2192 " + range.endDate }),
+            new Paragraph({
+              text: t("exportActualCoverage") + ": " + (coverage?.first.timestamp || t("historyDateUnknown")) + " \u2192 " + (coverage?.last.timestamp || t("historyDateUnknown"))
+            })
+          );
+        }
         const candidatesByMessage = await Promise.all(messages.map(async (message) => ({
           message,
           media: await this.getWordImageCandidates(message)
@@ -23370,7 +23387,7 @@
         if (!(file instanceof Blob) || file.size === 0) {
           throw new Error(t("wordExportEmptyError"));
         }
-        this.downloadBlob(file, `${this.getExportFilePrefix()}.docx`);
+        this.downloadBlob(file, this.getExportFilePrefix(range) + ".docx");
       }
       showInstructionsDialog() {
         return new Promise((resolve) => {

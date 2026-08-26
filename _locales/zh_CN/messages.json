@@ -120,6 +120,15 @@
     "message": "对话导出成功！（共 $COUNT$ 条消息）",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyRangeCoverage": {
+    "message": "所选范围为 $START$ 至 $END$；实际消息覆盖 $FIRST$ 至 $LAST$。没有消息的日期不会出现在归档中。",
+    "placeholders": {
+      "start": { "content": "$1" },
+      "end": { "content": "$2" },
+      "first": { "content": "$3" },
+      "last": { "content": "$4" }
+    }
+  },
   "errorExport": { "message": "导出对话失败" },
   "errorNoMessagesInRange": { "message": "所选日期范围内没有找到带有可识别时间的消息" },
   "exportFormatTitle": { "message": "选择导出格式" },
@@ -180,6 +189,8 @@
   "wordExportEmptyError": { "message": "生成的 Word 文档为空" },
   "exportImageAlt": { "message": "WhatsApp 图片附件" },
   "exportGeneratedOn": { "message": "生成时间" },
+  "exportSelectedRange": { "message": "所选日期范围" },
+  "exportActualCoverage": { "message": "实际消息覆盖范围" },
   "exportQuotedMessage": { "message": "回复的消息" },
   "exportMediaAttachment": { "message": "媒体附件" },
 

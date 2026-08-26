@@ -120,6 +120,15 @@
     "message": "Conversation exported successfully! ($COUNT$ messages)",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyRangeCoverage": {
+    "message": "Requested $START$ through $END$; actual messages cover $FIRST$ through $LAST$. Dates without messages do not appear in the archive.",
+    "placeholders": {
+      "start": { "content": "$1" },
+      "end": { "content": "$2" },
+      "first": { "content": "$3" },
+      "last": { "content": "$4" }
+    }
+  },
   "errorExport": { "message": "Failed to export conversation" },
   "errorNoMessagesInRange": { "message": "No messages with a recognized timestamp were found in the selected date range" },
   "exportFormatTitle": { "message": "Choose Export Format" },
@@ -180,6 +189,8 @@
   "wordExportEmptyError": { "message": "The generated Word document is empty" },
   "exportImageAlt": { "message": "WhatsApp image attachment" },
   "exportGeneratedOn": { "message": "Generated on" },
+  "exportSelectedRange": { "message": "Selected date range" },
+  "exportActualCoverage": { "message": "Actual message coverage" },
   "exportQuotedMessage": { "message": "Replying to a message" },
   "exportMediaAttachment": { "message": "Media attachment" },
 
