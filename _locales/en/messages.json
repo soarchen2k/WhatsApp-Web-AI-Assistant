@@ -31,12 +31,51 @@
   },
   "menuExport": { "message": "📤 Export Conversation" },
   "menuGenerate": { "message": "🤖 Generate AI Response" },
-  "menuLoadHistory": { "message": "📜 Load Full History" },
+  "menuLoadHistory": { "message": "🔄 Sync Full History" },
+  "menuStopHistory": { "message": "⏹ Stop History Sync" },
   "menuClearCache": { "message": "🗑️ Clear Cache" },
   "menuSettings": { "message": "⚙️ Settings" },
   "notifyActivated": { "message": "WhatsApp AI Assistant activated!" },
 
   "notifyLoadingHistory": { "message": "Loading full conversation history..." },
+  "historySyncProgress": {
+    "message": "Syncing: $COUNT$ cached; oldest visible is $OLDEST$. Click again to stop.",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncWaiting": {
+    "message": "Waiting for older messages: $COUNT$ cached; oldest visible is $OLDEST$.",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncRequestingPhone": {
+    "message": "Requesting older messages from your phone: $COUNT$ cached; oldest visible is $OLDEST$.",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncWaitingPhone": {
+    "message": "Older phone history is still available; waiting for WhatsApp: $COUNT$ cached; oldest visible is $OLDEST$.",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncCapturingVideo": { "message": "Saving video media at the current scroll position…" },
+  "historySyncCapturingMedia": { "message": "Saving media in the selected date range at the current scroll position…" },
+  "historyDateUnknown": { "message": "unknown time" },
+  "historyStopping": { "message": "Stopping…" },
+  "historyStoppingDetail": { "message": "Saving synchronized messages and restoring your reading position." },
+  "notifyHistoryStopping": { "message": "Stopping synchronization and saving current progress..." },
+  "notifyHistoryStopped": {
+    "message": "Synchronization stopped. $COUNT$ cached messages were kept.",
+    "placeholders": { "count": { "content": "$1" } }
+  },
   "notifyLoadingProgress": {
     "message": "Loading... $COUNT$ messages found",
     "placeholders": { "count": { "content": "$1" } }
@@ -49,17 +88,100 @@
     "message": "Loaded $COUNT$ messages. Cache updated with full conversation history.",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyHistoryVideoCapture": {
+    "message": "History sync captured $CAPTURED$ videos; $UNAVAILABLE$ videos remain unavailable.",
+    "placeholders": {
+      "captured": { "content": "$1" },
+      "unavailable": { "content": "$2" }
+    }
+  },
   "errorLoadHistory": { "message": "Failed to load full conversation history" },
+  "errorHistoryContainer": { "message": "Could not find the WhatsApp message scroll area" },
 
   "notifyCacheCleared": { "message": "Message cache cleared" },
   "errorClearCache": { "message": "Failed to clear cache" },
+  "warnCacheStorageLimit": { "message": "The local cache reached its storage limit. Older cached media may be removed." },
+  "warnCacheStorageFailed": { "message": "The local cache could not be saved. Export the conversation now or free browser storage." },
+  "warnCacheHistoryTruncated": { "message": "Only the newest part of this conversation could be kept in persistent cache." },
+  "warnCacheChatsEvicted": { "message": "Older conversation caches were removed to keep local storage bounded." },
+  "warnMediaCacheEvicted": { "message": "Older cached media was removed to keep local storage bounded." },
+  "warnMediaTooLarge": { "message": "A media file was too large for the local cache and will need to be captured again for export." },
 
   "notifyCollectingMessages": { "message": "Collecting conversation messages..." },
+  "notifyLoadingDateRange": {
+    "message": "Loading messages and media from $START$ through $END$…",
+    "placeholders": {
+      "start": { "content": "$1" },
+      "end": { "content": "$2" }
+    }
+  },
+  "notifyRangeExportStopped": { "message": "Date-range export stopped before the selected period was fully loaded." },
   "notifyExportSuccess": {
     "message": "Conversation exported successfully! ($COUNT$ messages)",
     "placeholders": { "count": { "content": "$1" } }
   },
   "errorExport": { "message": "Failed to export conversation" },
+  "errorNoMessagesInRange": { "message": "No messages with a recognized timestamp were found in the selected date range" },
+  "exportFormatTitle": { "message": "Choose Export Format" },
+  "exportFormatDesc": { "message": "Choose a date range to load only the needed history, or leave it blank to export the current cache without scrolling." },
+  "exportCacheSummary": {
+    "message": "$COUNT$ messages are currently cached, covering $RANGE$. Run “Sync Full History” first if you need a complete archive.",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "range": { "content": "$2" }
+    }
+  },
+  "exportCacheEmpty": { "message": "no messages cached yet" },
+  "exportFormatKicker": { "message": "CONVERSATION EXPORT" },
+  "exportDateRangeTitle": { "message": "Date range" },
+  "exportDateRangeOptional": { "message": "optional" },
+  "exportStartDate": { "message": "Start date" },
+  "exportEndDate": { "message": "End date" },
+  "exportDateRangeHint": { "message": "When both dates are set, the extension automatically loads backward to the start date, saves media in range, then restores your reading position." },
+  "exportDateRangeRequired": { "message": "Select both a start date and an end date, or leave both blank." },
+  "exportDateRangeInvalid": { "message": "The start date must be on or before the end date." },
+  "exportHtmlTitle": { "message": "HTML archive" },
+  "exportHtmlDetail": { "message": "Images and videos · Opens offline in a browser" },
+  "exportWordTitle": { "message": "Word document" },
+  "exportWordDetail": { "message": "Images only · Best for editing and printing" },
+  "btnExportHtml": { "message": "HTML Archive (images + videos)" },
+  "btnExportWord": { "message": "Word Document (images only)" },
+  "btnCancel": { "message": "Cancel" },
+  "notifyPreparingMedia": { "message": "Preparing media files for export..." },
+  "htmlVideoProgress": {
+    "message": "Capturing videos: $CURRENT$ / $TOTAL$",
+    "placeholders": {
+      "current": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "htmlVideoUnavailableSummary": {
+    "message": "$COUNT$ videos were not loaded in the current WhatsApp session. Their posters and an unavailable notice were preserved.",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "exportVideoPosterAlt": { "message": "WhatsApp video poster" },
+  "exportVideoUnavailable": { "message": "Video could not be retrieved from the current WhatsApp session" },
+  "wordExportPreparing": { "message": "Analyzing images for the Word document..." },
+  "wordExportImageProgress": {
+    "message": "Optimizing Word images: $CURRENT$ / $TOTAL$",
+    "placeholders": {
+      "current": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "wordExportBuilding": {
+    "message": "Building the Word document with $COUNT$ embedded images...",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "wordExportSkippedImages": {
+    "message": "$COUNT$ images were skipped because they were damaged, unavailable, or exceeded the document media budget.",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "wordExportEmptyError": { "message": "The generated Word document is empty" },
+  "exportImageAlt": { "message": "WhatsApp image attachment" },
+  "exportGeneratedOn": { "message": "Generated on" },
+  "exportQuotedMessage": { "message": "Replying to a message" },
+  "exportMediaAttachment": { "message": "Media attachment" },
 
   "instructionsTitle": { "message": "Instructions for Next Message" },
   "instructionsDesc": { "message": "Provide specific instructions for how the AI should respond to this conversation (optional):" },
@@ -152,6 +274,7 @@
   "errorInvalidApiKeyFormatSave": { "message": "Invalid API key format. Should start with \"AIza\"" },
   "errorInvalidDeepSeekApiKeyFormatSave": { "message": "Invalid DeepSeek API key format. Should start with \"sk-\"" },
   "notifySettingsSaved": { "message": "Settings saved successfully!" },
+  "errorSettingsSaveFailed": { "message": "Settings could not be saved. Check available browser storage and try again." },
 
   "defaultSystemInstructions": { "message": "You are a helpful AI assistant that generates appropriate responses for WhatsApp conversations. Keep responses natural, conversational, and contextually relevant." },
 
@@ -167,7 +290,7 @@
 
   "helpFeaturesTitle": { "message": "✨ Features" },
   "helpFeatureExportTitle": { "message": "Export Conversations" },
-  "helpFeatureExportDesc": { "message": "Extract and download complete WhatsApp conversations as text files for backup or analysis." },
+  "helpFeatureExportDesc": { "message": "Select a date range and export WhatsApp conversations as an HTML ZIP with images and videos, or as a Word document with images only." },
   "helpFeatureAiTitle": { "message": "AI Response Generation" },
   "helpFeatureAiDesc": { "message": "Generate contextually appropriate responses using your choice of Google Gemini or DeepSeek, based on conversation history." },
   "helpFeatureIntegrationTitle": { "message": "Smart Integration" },
@@ -180,7 +303,7 @@
   "helpExportStep1": { "message": "Open any WhatsApp conversation" },
   "helpExportStep2": { "message": "Click the green floating AI button (bottom-right corner)" },
   "helpExportStep3": { "message": "Select \"Export Conversation\"" },
-  "helpExportStep4": { "message": "The conversation will be downloaded as a text file" },
+  "helpExportStep4": { "message": "Optionally select both dates, then choose HTML ZIP or Word format" },
 
   "helpGeneratingTitle": { "message": "Generating AI Responses" },
   "helpGenerateStep1": { "message": "Make sure you've selected an AI provider and configured its API key" },
@@ -228,8 +351,8 @@
   "helpExtractionItem4": { "message": "<code>[data-pre-plain-text]</code> - Sender information for group chats" },
 
   "helpAiIntegrationTitle": { "message": "AI Integration" },
-  "helpAiIntegrationDesc": { "message": "The extension can call either Google's Gemini 2.0 Flash model or DeepSeek's chat completions API (V4 Flash / V4 Pro), depending on which provider you select:" },
-  "helpCodeEndpoint": { "message": "Gemini endpoint: /v1/models/gemini-2.0-flash:generateContent" },
+  "helpAiIntegrationDesc": { "message": "The extension can call either Google's Gemini 3.5 Flash model or DeepSeek's chat completions API (V4 Flash / V4 Pro), depending on which provider you select:" },
+  "helpCodeEndpoint": { "message": "Gemini endpoint: /v1beta/models/gemini-3.5-flash:generateContent" },
   "helpCodeDeepSeekEndpoint": { "message": "DeepSeek endpoint: https://api.deepseek.com/chat/completions" },
   "helpCodeTemperature": { "message": "Temperature: 0.7 (balanced creativity)" },
   "helpCodeMaxTokens": { "message": "Max Output Tokens: 1024" },
@@ -265,9 +388,9 @@
 
   "helpPrivacyTitle": { "message": "🔒 Privacy & Security" },
   "helpPrivacyItem1": { "message": "Message capture, caching, and formatting all happen locally in your browser" },
-  "helpPrivacyItem2": { "message": "Your API keys are stored in Chrome's sync storage and each is only ever sent to its own provider (Gemini key to Google, DeepSeek key to DeepSeek)" },
-  "helpPrivacyItem3": { "message": "When you request an AI response, the full conversation text — plus up to 3 recent images if you're using Gemini — is sent to whichever provider you have selected; this is not purely local processing, so evaluate whether this fits your data compliance needs before using it with real customer conversations" },
-  "helpPrivacyItem4": { "message": "No data is stored on any server other than your selected provider's, and only for the duration of the API call" },
+  "helpPrivacyItem2": { "message": "Your API keys are stored on this device in Chrome local storage, which is not encrypted; each key is sent only to its own provider" },
+  "helpPrivacyItem3": { "message": "When you request an AI response, the 50 most recent messages — plus up to 3 recent images if you're using Gemini — are sent to the selected provider; evaluate whether this fits your data compliance needs" },
+  "helpPrivacyItem4": { "message": "The extension operates no data server; your selected AI provider handles requests according to its own retention and privacy policy" },
   "helpPrivacyItem5": { "message": "The extension only runs on web.whatsapp.com" },
 
   "helpVersionHistoryTitle": { "message": "📝 Version History" },
@@ -275,6 +398,8 @@
   "helpVersion2": { "message": "<strong>v1.1</strong> - Improved conversation formatting and added an instructions dialog for AI responses" },
   "helpVersion3": { "message": "<strong>v1.2</strong> - Added bilingual (English/Chinese) UI and DeepSeek as a second AI provider" },
   "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini can now see up to 3 recent images from the conversation as visual context" },
+  "helpVersion5": { "message": "<strong>v1.4</strong> - Added HTML ZIP exports with images and videos, plus Word exports with images only" },
+  "helpVersion6": { "message": "<strong>v1.6</strong> - Added date-range synchronization, filtered exports, and persistent local media caching" },
 
   "helpSupportTitle": { "message": "📞 Support" },
   "helpSupportDesc": { "message": "For issues, suggestions, or contributions, please check the extension's documentation or create an issue in the project repository." }

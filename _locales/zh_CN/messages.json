@@ -31,12 +31,51 @@
   },
   "menuExport": { "message": "📤 导出对话" },
   "menuGenerate": { "message": "🤖 生成 AI 回复" },
-  "menuLoadHistory": { "message": "📜 加载完整历史" },
+  "menuLoadHistory": { "message": "🔄 同步完整历史" },
+  "menuStopHistory": { "message": "⏹ 停止历史同步" },
   "menuClearCache": { "message": "🗑️ 清除缓存" },
   "menuSettings": { "message": "⚙️ 设置" },
   "notifyActivated": { "message": "WhatsApp AI 助手已激活！" },
 
   "notifyLoadingHistory": { "message": "正在加载完整对话历史..." },
+  "historySyncProgress": {
+    "message": "正在同步：已缓存 $COUNT$ 条，当前最早 $OLDEST$。再次点击可停止。",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncWaiting": {
+    "message": "正在等待更早的消息：已缓存 $COUNT$ 条，当前最早 $OLDEST$。",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncRequestingPhone": {
+    "message": "正在向手机请求更早的消息：已缓存 $COUNT$ 条，当前最早 $OLDEST$。",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncWaitingPhone": {
+    "message": "手机上仍有更早记录，正在等待 WhatsApp 加载：已缓存 $COUNT$ 条，当前最早 $OLDEST$。",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "oldest": { "content": "$2" }
+    }
+  },
+  "historySyncCapturingVideo": { "message": "正在保存当前滚动位置中的视频媒体，请稍候…" },
+  "historySyncCapturingMedia": { "message": "正在保存当前滚动位置中属于所选日期范围的媒体，请稍候…" },
+  "historyDateUnknown": { "message": "时间未知" },
+  "historyStopping": { "message": "正在停止…" },
+  "historyStoppingDetail": { "message": "正在保存已同步的消息并恢复阅读位置。" },
+  "notifyHistoryStopping": { "message": "正在停止同步并保存当前进度..." },
+  "notifyHistoryStopped": {
+    "message": "同步已停止，已保留 $COUNT$ 条缓存消息。",
+    "placeholders": { "count": { "content": "$1" } }
+  },
   "notifyLoadingProgress": {
     "message": "加载中...已找到 $COUNT$ 条消息",
     "placeholders": { "count": { "content": "$1" } }
@@ -49,17 +88,100 @@
     "message": "已加载 $COUNT$ 条消息，缓存已更新为完整对话历史。",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyHistoryVideoCapture": {
+    "message": "历史同步已捕获 $CAPTURED$ 个视频，$UNAVAILABLE$ 个视频暂时无法获取。",
+    "placeholders": {
+      "captured": { "content": "$1" },
+      "unavailable": { "content": "$2" }
+    }
+  },
   "errorLoadHistory": { "message": "加载完整对话历史失败" },
+  "errorHistoryContainer": { "message": "找不到 WhatsApp 消息滚动区域" },
 
   "notifyCacheCleared": { "message": "消息缓存已清除" },
   "errorClearCache": { "message": "清除缓存失败" },
+  "warnCacheStorageLimit": { "message": "本地缓存已达到容量上限，较早的媒体缓存可能会被移除。" },
+  "warnCacheStorageFailed": { "message": "本地缓存保存失败。请立即导出对话，或释放浏览器存储空间。" },
+  "warnCacheHistoryTruncated": { "message": "持久化缓存只能保留此对话中较新的部分。" },
+  "warnCacheChatsEvicted": { "message": "为限制本地存储占用，较早的对话缓存已被移除。" },
+  "warnMediaCacheEvicted": { "message": "为限制本地存储占用，较早的媒体缓存已被移除。" },
+  "warnMediaTooLarge": { "message": "某个媒体文件过大，无法写入本地缓存；导出时需要重新捕获。" },
 
   "notifyCollectingMessages": { "message": "正在收集对话消息..." },
+  "notifyLoadingDateRange": {
+    "message": "正在加载 $START$ 至 $END$ 的消息和媒体…",
+    "placeholders": {
+      "start": { "content": "$1" },
+      "end": { "content": "$2" }
+    }
+  },
+  "notifyRangeExportStopped": { "message": "日期范围导出已停止，所选时间段尚未完整加载。" },
   "notifyExportSuccess": {
     "message": "对话导出成功！（共 $COUNT$ 条消息）",
     "placeholders": { "count": { "content": "$1" } }
   },
   "errorExport": { "message": "导出对话失败" },
+  "errorNoMessagesInRange": { "message": "所选日期范围内没有找到带有可识别时间的消息" },
+  "exportFormatTitle": { "message": "选择导出格式" },
+  "exportFormatDesc": { "message": "选择日期范围后只加载所需历史；留空则不滚动聊天，直接导出当前缓存。" },
+  "exportCacheSummary": {
+    "message": "当前缓存 $COUNT$ 条，范围：$RANGE$。如需完整归档，请先运行“同步完整历史”。",
+    "placeholders": {
+      "count": { "content": "$1" },
+      "range": { "content": "$2" }
+    }
+  },
+  "exportCacheEmpty": { "message": "尚未缓存消息" },
+  "exportFormatKicker": { "message": "对话导出" },
+  "exportDateRangeTitle": { "message": "日期范围" },
+  "exportDateRangeOptional": { "message": "可选" },
+  "exportStartDate": { "message": "开始日期" },
+  "exportEndDate": { "message": "结束日期" },
+  "exportDateRangeHint": { "message": "同时选择两个日期后，插件会自动向前加载到开始日期，仅保存范围内媒体，完成后恢复原阅读位置。" },
+  "exportDateRangeRequired": { "message": "请同时选择开始日期和结束日期，或将两者都留空。" },
+  "exportDateRangeInvalid": { "message": "开始日期不能晚于结束日期。" },
+  "exportHtmlTitle": { "message": "HTML 归档" },
+  "exportHtmlDetail": { "message": "包含图片和视频，可离线在浏览器中打开" },
+  "exportWordTitle": { "message": "Word 文档" },
+  "exportWordDetail": { "message": "仅包含图片，适合编辑和打印" },
+  "btnExportHtml": { "message": "HTML 归档（图片 + 视频）" },
+  "btnExportWord": { "message": "Word 文档（仅图片）" },
+  "btnCancel": { "message": "取消" },
+  "notifyPreparingMedia": { "message": "正在准备导出的媒体文件..." },
+  "htmlVideoProgress": {
+    "message": "正在捕获视频：$CURRENT$ / $TOTAL$",
+    "placeholders": {
+      "current": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "htmlVideoUnavailableSummary": {
+    "message": "有 $COUNT$ 个视频未在当前页面会话中加载，导出文件已保留封面和缺失说明。",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "exportVideoPosterAlt": { "message": "WhatsApp 视频封面" },
+  "exportVideoUnavailable": { "message": "视频未能从当前 WhatsApp 会话中获取" },
+  "wordExportPreparing": { "message": "正在分析 Word 文档中的图片..." },
+  "wordExportImageProgress": {
+    "message": "正在优化 Word 图片：$CURRENT$ / $TOTAL$",
+    "placeholders": {
+      "current": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "wordExportBuilding": {
+    "message": "正在生成 Word 文档（已嵌入 $COUNT$ 张图片）...",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "wordExportSkippedImages": {
+    "message": "有 $COUNT$ 张图片因损坏、不可访问或文档大小限制而被跳过。",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "wordExportEmptyError": { "message": "生成的 Word 文档为空" },
+  "exportImageAlt": { "message": "WhatsApp 图片附件" },
+  "exportGeneratedOn": { "message": "生成时间" },
+  "exportQuotedMessage": { "message": "回复的消息" },
+  "exportMediaAttachment": { "message": "媒体附件" },
 
   "instructionsTitle": { "message": "下一条消息的指令" },
   "instructionsDesc": { "message": "为 AI 如何回复这段对话提供具体指令（可选）：" },
@@ -152,6 +274,7 @@
   "errorInvalidApiKeyFormatSave": { "message": "API Key 格式不正确，应以“AIza”开头" },
   "errorInvalidDeepSeekApiKeyFormatSave": { "message": "DeepSeek API Key 格式不正确，应以“sk-”开头" },
   "notifySettingsSaved": { "message": "设置保存成功！" },
+  "errorSettingsSaveFailed": { "message": "设置保存失败，请检查浏览器可用存储空间后重试。" },
 
   "defaultSystemInstructions": { "message": "你是一个乐于助人的 AI 助手，负责为 WhatsApp 对话生成合适的回复。请保持回复自然、口语化，并贴合上下文。" },
 
@@ -167,7 +290,7 @@
 
   "helpFeaturesTitle": { "message": "✨ 功能特性" },
   "helpFeatureExportTitle": { "message": "导出对话" },
-  "helpFeatureExportDesc": { "message": "提取并下载完整的 WhatsApp 对话为文本文件，方便备份或分析。" },
+  "helpFeatureExportDesc": { "message": "选择日期范围，将 WhatsApp 对话导出为包含图片和视频的 HTML ZIP，或导出为仅包含图片的 Word 文档。" },
   "helpFeatureAiTitle": { "message": "AI 回复生成" },
   "helpFeatureAiDesc": { "message": "基于对话历史，使用你选择的 Google Gemini 或 DeepSeek 生成符合上下文的回复建议。" },
   "helpFeatureIntegrationTitle": { "message": "智能集成" },
@@ -180,7 +303,7 @@
   "helpExportStep1": { "message": "打开任意一个 WhatsApp 对话" },
   "helpExportStep2": { "message": "点击右下角的绿色悬浮 AI 按钮" },
   "helpExportStep3": { "message": "选择“Export Conversation（导出对话）”" },
-  "helpExportStep4": { "message": "对话会以文本文件的形式下载" },
+  "helpExportStep4": { "message": "可选：同时选择起止日期，然后选择 HTML ZIP 或 Word 格式" },
 
   "helpGeneratingTitle": { "message": "生成 AI 回复" },
   "helpGenerateStep1": { "message": "确认已经选择好 AI 服务商并配置了对应的 API Key" },
@@ -228,8 +351,8 @@
   "helpExtractionItem4": { "message": "<code>[data-pre-plain-text]</code> - 群聊中的发送者信息" },
 
   "helpAiIntegrationTitle": { "message": "AI 集成" },
-  "helpAiIntegrationDesc": { "message": "插件可以调用 Google Gemini 2.0 Flash 模型，也可以调用 DeepSeek 的对话补全接口（V4 Flash / V4 Pro），取决于你选择的服务商：" },
-  "helpCodeEndpoint": { "message": "Gemini 接口：/v1/models/gemini-2.0-flash:generateContent" },
+  "helpAiIntegrationDesc": { "message": "插件可以调用 Google Gemini 3.5 Flash 模型，也可以调用 DeepSeek 的对话补全接口（V4 Flash / V4 Pro），取决于你选择的服务商：" },
+  "helpCodeEndpoint": { "message": "Gemini 接口：/v1beta/models/gemini-3.5-flash:generateContent" },
   "helpCodeDeepSeekEndpoint": { "message": "DeepSeek 接口：https://api.deepseek.com/chat/completions" },
   "helpCodeTemperature": { "message": "Temperature：0.7（创造性与稳定性的平衡）" },
   "helpCodeMaxTokens": { "message": "最大输出 Token 数：1024" },
@@ -265,9 +388,9 @@
 
   "helpPrivacyTitle": { "message": "🔒 隐私与安全" },
   "helpPrivacyItem1": { "message": "消息的抓取、缓存与格式化都在浏览器本地完成" },
-  "helpPrivacyItem2": { "message": "各服务商的 API Key 分别保存在 Chrome 的同步存储中，Gemini Key 只会发给 Google，DeepSeek Key 只会发给 DeepSeek" },
-  "helpPrivacyItem3": { "message": "当你点击生成 AI 回复时，完整的对话文本——如果使用 Gemini，还包括最近最多 3 张图片——会被发送给你当前选择的服务商，这并非纯本地处理，在用于真实客户对话前，请评估是否符合你的数据合规要求" },
-  "helpPrivacyItem4": { "message": "除了调用所选服务商的 API 之外，数据不会被存储在本插件以外的任何服务器上" },
+  "helpPrivacyItem2": { "message": "API Key 仅保存在本机的 Chrome 本地存储中（该存储未加密），并且只会发送给对应的服务商" },
+  "helpPrivacyItem3": { "message": "生成 AI 回复时，最近 50 条消息——使用 Gemini 时还包括最近最多 3 张图片——会被发送给所选服务商，请提前评估数据合规要求" },
+  "helpPrivacyItem4": { "message": "本插件不运营数据服务器；所选 AI 服务商会按照其自身的数据保留与隐私政策处理请求" },
   "helpPrivacyItem5": { "message": "插件仅在 web.whatsapp.com 上生效" },
 
   "helpVersionHistoryTitle": { "message": "📝 版本历史" },
@@ -275,6 +398,8 @@
   "helpVersion2": { "message": "<strong>v1.1</strong> - 优化对话格式化，新增自定义指令弹窗" },
   "helpVersion3": { "message": "<strong>v1.2</strong> - 新增中英双语界面，并支持 DeepSeek 作为第二个 AI 服务商" },
   "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini 现在可以看到对话中最近最多 3 张图片作为视觉上下文" },
+  "helpVersion5": { "message": "<strong>v1.4</strong> - 新增包含图片和视频的 HTML ZIP 导出，以及仅包含图片的 Word 导出" },
+  "helpVersion6": { "message": "<strong>v1.6</strong> - 新增日期范围同步、范围过滤导出和本地媒体持久化缓存" },
 
   "helpSupportTitle": { "message": "📞 支持" },
   "helpSupportDesc": { "message": "如遇到问题、有建议或需要贡献代码，请查阅项目文档，或在项目仓库中提交 issue。" }

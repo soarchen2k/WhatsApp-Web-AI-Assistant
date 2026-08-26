@@ -2,29 +2,31 @@
 
 English | [中文](README.zh-CN.md)
 
-A Chrome extension that enables you to export WhatsApp Web conversations and generate AI responses using Google's Gemini AI.
+A Chrome extension that exports WhatsApp Web conversations and generates AI responses with Google Gemini or DeepSeek.
 
 ## Features
 
-- 📤 **Export Conversations**: Extract and download complete WhatsApp conversations as text files
-- 🤖 **AI Response Generation**: Generate contextually appropriate responses using Google's Gemini AI
+- 📤 **Date-range exports**: Select a start and end date, automatically load only the required history, and download an HTML ZIP with images/videos or a Word document with images
+- 🤖 **AI Response Generation**: Generate contextually appropriate responses using Gemini 3.5 Flash or DeepSeek V4
 - ⚙️ **Custom System Instructions**: Personalize AI behavior with custom instructions and presets
 - ✨ **Smart Integration**: Insert AI-generated responses directly into WhatsApp's message input
 - 📋 **Copy to Clipboard**: Easily copy generated responses for use elsewhere
-- 🔒 **Privacy-Focused**: All processing happens locally in your browser
+- 🔒 **Privacy-Focused**: Capture, caching, and formatting happen locally; AI context is sent only when you request a response
 
 ## Installation
 
-1. **Download or Clone** this repository to your local machine
-2. **Open Chrome** and navigate to `chrome://extensions/`
-3. **Enable Developer Mode** (toggle in the top-right corner)
-4. **Click "Load unpacked"** and select the extension folder
-5. **Pin the extension** to your toolbar for easy access
+1. **Download or clone** this repository. The committed `dist/` directory can be loaded directly; after changing source code, run `npm install` and `npm run build` first.
+2. **Open Chrome** and navigate to `chrome://extensions/`.
+3. **Enable Developer Mode** (toggle in the top-right corner).
+4. **Click "Load unpacked"** and select the extension folder.
+5. **Pin the extension** to your toolbar for easy access.
 
 ## Setup
 
-1. **Get a Gemini API Key**:
-   - Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
+1. **Get an API Key** from [Google AI Studio](https://aistudio.google.com/app/apikey) or the [DeepSeek Platform](https://platform.deepseek.com/api_keys).
+
+   For Gemini:
+   - Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
    - Sign in with your Google account
    - Create a new API key (free tier available)
 
@@ -32,7 +34,7 @@ A Chrome extension that enables you to export WhatsApp Web conversations and gen
    - Open [WhatsApp Web](https://web.whatsapp.com)
    - Look for the green floating AI button (bottom-right corner)
    - Click the button and select "Settings"
-   - Enter your Gemini API key and save
+   - Choose Gemini or DeepSeek, enter the matching API key, and save
    - Optionally customize the system instructions to personalize AI responses
 
 ## Usage
@@ -42,7 +44,10 @@ A Chrome extension that enables you to export WhatsApp Web conversations and gen
 1. Open any WhatsApp conversation
 2. Click the floating AI button
 3. Select "Export Conversation"
-4. The conversation will be downloaded as a text file
+4. Optionally select both a start and end date. The extension loads backward to the start date, caches media in range, and restores your reading position
+5. Choose an export format:
+   - **HTML Archive** downloads a ZIP containing `index.html` and its image/video files
+   - **Word Document** downloads a `.docx` with images only; videos are excluded
 
 ### Generating AI Responses
 
@@ -76,7 +81,7 @@ The extension uses advanced DOM selectors to extract messages from WhatsApp Web:
 - **Timestamps**: Retrieved from message metadata
 - **Group chat senders**: Identified from message attributes
 
-The conversation is then formatted and sent to Google's Gemini AI API to generate contextually appropriate responses.
+The 50 most recent extracted messages are formatted and sent to the selected AI provider only when you request a response.
 
 ## Technical Details
 
@@ -93,10 +98,10 @@ document.querySelectorAll('[data-testid="msg-container"]')
 ```
 
 ### AI Integration
-- **Model**: Gemini Flash ( Recommended for fast responses )
+- **Models**: `gemini-3.5-flash`, `deepseek-v4-flash`, or `deepseek-v4-pro`
 - **Temperature**: 0.7 (balanced creativity)
 - **Max Tokens**: 1024
-- **Context**: 100 most recent messages
+- **Context**: 50 most recent messages
 
 ### Supported Features
 - ✅ Text messages
@@ -104,14 +109,17 @@ document.querySelectorAll('[data-testid="msg-container"]')
 - ✅ Individual chats
 - ✅ Message timestamps
 - ✅ Sender identification
-- ⚠️ Media messages (Will be available soon)
+- ✅ Images in HTML ZIP and Word exports
+- ✅ Videos in HTML ZIP exports
+- ⚠️ Word exports intentionally exclude videos
 
 ## Privacy & Security
 
-- All message processing happens locally in your browser
-- API key is stored securely in Chrome's sync storage
-- Conversations are only sent to Gemini when you explicitly request AI responses
-- No data is stored on external servers (except during API calls)
+- Message capture, caching, and formatting happen locally in your browser
+- API keys are stored on this device in Chrome local storage; browser extension storage is not encrypted, so protect access to your browser profile
+- The 50-message AI context, plus up to three recent images for Gemini, is sent only when you explicitly request an AI response
+- Message metadata is bounded in local storage; cached media uses a bounded IndexedDB cache and older entries may be evicted
+- No data is sent to servers other than the AI provider you select
 - Extension only works on `web.whatsapp.com` for security
 
 ## File Structure
@@ -119,15 +127,19 @@ document.querySelectorAll('[data-testid="msg-container"]')
 ```
 whatsapp-web-ai/
 ├── manifest.json          # Extension configuration
-├── content.js             # Main functionality and WhatsApp integration
+├── content.js             # Source for WhatsApp integration and UI
+├── media-hook.js          # Narrow MAIN-world bridge for decrypted video Blobs
+├── dist/content.js        # Built content script loaded by the manifest
+├── scripts/               # Build, package, and media-hook tests
+├── src/cache-policy.mjs   # Pure cache quota and eviction policy
 ├── styles.css             # UI styling
 ├── popup.html             # Extension popup interface
 ├── popup.js               # Popup functionality
-├── background.js          # Service worker
 ├── help.html              # In-extension help page (localized via _locales)
 ├── _locales/
 │   ├── en/messages.json    # English UI strings
 │   └── zh_CN/messages.json # Chinese (Simplified) UI strings
+├── package.json           # Build/test/package commands
 ├── README.md              # This file
 └── README.zh-CN.md        # Chinese version of this file
 ```
@@ -139,20 +151,21 @@ The extension UI (popup, floating button, notifications, settings, and the help 
 ### Prerequisites
 - Chrome browser
 - Basic knowledge of JavaScript/HTML/CSS
-- Gemini API key
+- A Gemini or DeepSeek API key for AI-response testing
 
 ### Local Development
 1. Clone the repository
-2. Make changes to the source files
-3. Reload the extension in `chrome://extensions/`
-4. Test on WhatsApp Web
+2. Run `npm install`
+3. Make changes to the source files and run `npm run build`
+4. Reload the extension in `chrome://extensions/`
+5. Test on WhatsApp Web
 
 ### Key Components
 
 **content.js**: Main script that:
 - Detects WhatsApp messages using CSS selectors
 - Extracts conversation data
-- Interfaces with Gemini AI API
+- Interfaces with Gemini and DeepSeek APIs
 - Manages UI interactions
 
 **styles.css**: Provides styling for:
@@ -180,9 +193,7 @@ The extension UI (popup, floating button, notifications, settings, and the help 
 
 ## API Rate Limits
 
-Google's Gemini API has rate limits:
-- **Free tier**: 60 requests per minute
-- **Paid tier**: Higher limits available
+Limits and pricing change over time. Check the current Gemini or DeepSeek documentation for the account and model you selected.
 
 ## Contributing
 
@@ -209,4 +220,4 @@ For issues, suggestions, or questions:
 
 ---
 
-**Note**: This extension requires a Google Gemini API key to function. Make sure to keep your API key secure and never share it publicly.
+**Note**: AI response generation requires either a Gemini or DeepSeek API key. Conversation export does not require an API key.

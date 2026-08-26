@@ -2,12 +2,12 @@
 
 [English](README.md) | 中文
 
-一个 Chrome 浏览器插件，可以导出 WhatsApp Web 对话，并使用 Google Gemini AI 生成回复建议。
+一个 Chrome 浏览器插件，可以导出 WhatsApp Web 对话，并使用 Google Gemini 或 DeepSeek 生成回复建议。
 
 ## 功能特性
 
-- 📤 **导出对话**：提取并下载完整的 WhatsApp 对话为文本文件
-- 🤖 **AI 回复生成**：基于 Google Gemini AI 生成符合上下文的回复建议
+- 📤 **按日期范围导出**：选择开始和结束日期，只自动加载所需历史，并导出包含图片/视频的 HTML ZIP 或包含图片的 Word 文档
+- 🤖 **AI 回复生成**：使用 Gemini 3.5 Flash 或 DeepSeek V4 生成符合上下文的回复建议
 - ⚙️ **自定义系统指令**：通过自定义指令和预设模板个性化 AI 的表现
 - ✨ **智能集成**：将 AI 生成的回复直接插入 WhatsApp 消息输入框
 - 📋 **复制到剪贴板**：方便地将生成的回复复制到其他地方使用
@@ -15,7 +15,7 @@
 
 ## 安装方法
 
-1. **下载或克隆**本仓库到本地
+1. **下载或克隆**本仓库到本地。仓库已提交 `dist/`，可以直接加载；修改源码后必须先运行 `npm install` 和 `npm run build`
 2. 打开 **Chrome**，进入 `chrome://extensions/`
 3. 打开右上角的 **开发者模式**
 4. 点击 **"加载已解压的扩展程序"**，选择本插件所在文件夹
@@ -23,7 +23,7 @@
 
 ## 使用前配置
 
-1. **获取 Gemini API Key**：
+1. 从 [Google AI Studio](https://aistudio.google.com/app/apikey) 或 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 获取 API Key：
    - 访问 [Google AI Studio](https://makersuite.google.com/app/apikey)
    - 使用 Google 账号登录
    - 创建一个新的 API Key（有免费额度）
@@ -32,7 +32,7 @@
    - 打开 [WhatsApp Web](https://web.whatsapp.com)
    - 找到右下角的绿色悬浮 AI 按钮
    - 点击按钮，选择"Settings（设置）"
-   - 输入你的 Gemini API Key 并保存
+   - 选择 Gemini 或 DeepSeek，输入对应的 API Key 并保存
    - 可选：自定义系统指令，让 AI 回复风格更符合你的需求
 
 ## 使用方法
@@ -42,7 +42,10 @@
 1. 打开任意一个 WhatsApp 对话
 2. 点击悬浮 AI 按钮
 3. 选择"Export Conversation（导出对话）"
-4. 对话会被下载为一个文本文件
+4. 可选：同时选择开始和结束日期。插件会自动向前加载到开始日期、缓存范围内媒体，并在完成后恢复原阅读位置
+5. 选择导出格式：
+   - **HTML 归档**会下载包含 `index.html` 和图片/视频文件的 ZIP
+   - **Word 文档**会下载仅包含图片的 `.docx`，视频将被跳过
 
 ### 生成 AI 回复
 
@@ -78,7 +81,7 @@ AI 会根据这些指令来调整它生成的回复内容。
 - **时间戳**：从消息的元数据中获取
 - **群聊发送者**：从消息属性中识别
 
-提取到的对话内容会被整理格式化后，发送给 Google 的 Gemini AI 接口，用于生成符合上下文的回复建议。
+只有在你主动生成 AI 回复时，最近 50 条已提取消息才会被格式化并发送给当前选择的 AI 服务商。
 
 ## 技术细节
 
@@ -95,10 +98,10 @@ document.querySelectorAll('[data-testid="msg-container"]')
 ```
 
 ### AI 集成
-- **模型**：Gemini Flash（推荐用于快速响应）
+- **模型**：`gemini-3.5-flash`、`deepseek-v4-flash` 或 `deepseek-v4-pro`
 - **Temperature**：0.7（创造性与稳定性的平衡）
 - **最大 Token 数**：1024
-- **上下文**：最近 100 条消息
+- **上下文**：最近 50 条消息
 
 ### 支持情况
 - ✅ 文本消息
@@ -106,14 +109,17 @@ document.querySelectorAll('[data-testid="msg-container"]')
 - ✅ 单聊
 - ✅ 消息时间戳
 - ✅ 发送者识别
-- ⚠️ 媒体消息（即将支持）
+- ✅ HTML ZIP 和 Word 导出中的图片
+- ✅ HTML ZIP 导出中的视频
+- ⚠️ Word 导出会按设计跳过视频
 
 ## 隐私与安全
 
 - 大部分消息处理（抓取、缓存、格式化）都在浏览器本地完成
-- **但生成 AI 回复时，完整的对话文本会发送给 Google 的 Gemini API**，这不属于"纯本地处理"，请在用于真实客户对话前评估是否符合你的数据合规要求（例如是否需要脱敏、是否需要提前告知客户）
-- API Key 保存在 Chrome 的 `storage.sync` 中，不会上传到本插件之外的任何服务器
+- **但生成 AI 回复时，最近 50 条消息会发送给所选 AI 服务商；使用 Gemini 时还可能发送最近最多 3 张图片**。这不属于“纯本地处理”，请在用于真实客户对话前评估数据合规要求
+- API Key 仅保存在本机的 Chrome `storage.local` 中；扩展存储并未加密，请保护好浏览器用户配置文件
 - 对话缓存以明文形式保存在浏览器本地存储中；如果多人共用同一台电脑/同一个浏览器账号，请注意不同客户对话之间可能互相可见
+- 消息元数据和 IndexedDB 媒体缓存均设有容量上限，较早的持久化缓存可能被自动淘汰
 - 插件仅在 `web.whatsapp.com` 域名下生效
 
 ## 文件结构
@@ -121,15 +127,19 @@ document.querySelectorAll('[data-testid="msg-container"]')
 ```
 whatsapp-web-ai/
 ├── manifest.json          # 插件配置文件
-├── content.js             # 核心功能与 WhatsApp 集成逻辑
+├── content.js             # WhatsApp 集成与界面的源码
+├── media-hook.js          # 用于捕获解密视频 Blob 的受限 MAIN world 桥
+├── dist/content.js        # manifest 实际加载的构建产物
+├── scripts/               # 构建、打包和媒体桥测试脚本
+├── src/cache-policy.mjs   # 纯函数缓存配额与淘汰策略
 ├── styles.css             # 界面样式
 ├── popup.html             # 插件弹出窗口界面
 ├── popup.js               # 弹出窗口逻辑
-├── background.js          # 后台 Service Worker
 ├── help.html              # 插件内帮助页（通过 _locales 支持中英双语）
 ├── _locales/
 │   ├── en/messages.json    # 英文界面文案
 │   └── zh_CN/messages.json # 简体中文界面文案
+├── package.json           # 构建、测试和打包命令
 ├── README.md              # 项目说明（英文）
 └── README.zh-CN.md        # 项目说明（中文，本文件）
 ```
@@ -141,20 +151,21 @@ whatsapp-web-ai/
 ### 前置条件
 - Chrome 浏览器
 - 基本的 JavaScript/HTML/CSS 知识
-- Gemini API Key
+- 用于测试 AI 回复的 Gemini 或 DeepSeek API Key
 
 ### 本地开发流程
 1. 克隆仓库
-2. 修改源代码
-3. 在 `chrome://extensions/` 中重新加载插件
-4. 在 WhatsApp Web 上测试
+2. 运行 `npm install`
+3. 修改源代码后运行 `npm run build`
+4. 在 `chrome://extensions/` 中重新加载插件
+5. 在 WhatsApp Web 上测试
 
 ### 核心组件说明
 
 **content.js**：主脚本，负责：
 - 使用 CSS 选择器识别 WhatsApp 消息
 - 提取对话数据
-- 与 Gemini AI 接口交互
+- 与 Gemini 和 DeepSeek 接口交互
 - 管理界面交互
 
 **styles.css**：提供以下样式：
@@ -182,9 +193,7 @@ whatsapp-web-ai/
 
 ## API 调用限额
 
-Google 的 Gemini API 存在调用限额：
-- **免费额度**：每分钟 60 次请求
-- **付费额度**：可获得更高的限额
+调用限额和价格会随时间变化，请查看当前所选模型对应的 Gemini 或 DeepSeek 官方文档。
 
 ## 参与贡献
 
@@ -206,9 +215,9 @@ Google 的 Gemini API 存在调用限额：
 
 如遇到问题、有建议或疑问，欢迎：
 - 在 GitHub 仓库中提交 issue
-- 查看 `help.zh-CN.html` 获取详细文档
+- 查看 `help.html` 获取详细文档
 - 参考上方的"常见问题排查"部分
 
 ---
 
-**提示**：本插件需要 Google Gemini API Key 才能正常使用，请妥善保管你的 API Key，切勿公开分享。
+**提示**：生成 AI 回复需要 Gemini 或 DeepSeek API Key；仅导出对话不需要 API Key。

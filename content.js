@@ -1,3 +1,16 @@
+import JSZip from 'jszip';
+import { Document, HeadingLevel, ImageRun, Packer, Paragraph, TextRun } from 'docx';
+import {
+  MESSAGE_CACHE_MAX_BYTES_PER_CHAT,
+  MESSAGE_CACHE_TOTAL_BUDGET_BYTES,
+  MEDIA_CACHE_MAX_ASSET_BYTES,
+  MEDIA_CACHE_TOTAL_BUDGET_BYTES,
+  chooseOldestEvictions,
+  createBoundedMessageEnvelope,
+  getSerializedByteLength,
+  planMediaEvictions
+} from './src/cache-policy.mjs';
+
 // Content script that runs on WhatsApp Web
 // Prevent multiple injections
 if (window.whatsappAILoaded) {
@@ -10,6 +23,25 @@ function t(key, subs) {
   return chrome.i18n.getMessage(key, subs) || key;
 }
 
+// Keep the model and endpoint in one place so generation and the connection
+// test cannot drift apart when Google retires a model.
+const GEMINI_MODEL = 'gemini-3.5-flash';
+const GEMINI_GENERATE_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Versioned deliberately: earlier cache records used unstable DOM-based keys
+// and could be duplicated after WhatsApp re-rendered a conversation.
+const MESSAGE_CACHE_SCHEMA_VERSION = 3;
+const MEDIA_HOOK_SOURCE = 'whatsapp-ai-media-hook';
+const MEDIA_CONTENT_SOURCE = 'whatsapp-ai-content';
+const MEDIA_DATABASE_NAME = 'whatsapp-ai-export-media';
+const MEDIA_DATABASE_VERSION = 2;
+const MEDIA_STORE_NAME = 'assets';
+const MEDIA_METADATA_STORE_NAME = 'asset-metadata';
+// Large camera originals can freeze WhatsApp while docx hashes and compresses
+// every byte. Word receives optimized copies and stops adding media only after
+// this bounded in-document budget; conversation text is never truncated.
+const WORD_MEDIA_BUDGET_BYTES = 32 * 1024 * 1024;
+const WORD_IMAGE_MAX_DIMENSION = 1280;
+
 class WhatsAppAI {
   constructor() {
     this.messages = [];
@@ -20,96 +52,542 @@ class WhatsAppAI {
     this.deepseekModel = 'deepseek-v4-flash';
     this.messageCache = new Map(); // Local cache for messages
     this.chatId = null; // Current chat identifier
-    this.lastScrollPosition = 0;
+    this.chatSwitchObserver = null;
+    this.chatSwitchTimer = null;
+    this.chatLoadSequence = 0;
+    this.pendingChatId = null;
+    this.isSwitchingChat = false;
+    this.scrollContainer = null;
+    this.scrollHandler = null;
+    this.cacheSaveTimer = null;
+    this.historySync = null;
+    this.historySyncSequence = 0;
+    this.exportProgressNotification = null;
+    this.mediaHookReady = false;
+    this.pendingVideoCaptureRequests = new Map();
+    this.videoCaptureSequence = 0;
+    this.videoBlobCache = new Map();
+    this.historyVideoCaptureAttempts = new Map();
+    this.mediaDatabasePromise = null;
+    this.cacheStorageWarningsShown = new Set();
+    this.shortDateOrder = null;
+    this.setupMediaCaptureBridge();
     this.init();
   }
 
-  async init() {
-    // Get API key and system instructions from storage
-    const result = await chrome.storage.sync.get([
-      'geminiApiKey', 'systemInstructions', 'aiProvider', 'deepseekApiKey', 'deepseekModel'
-    ]);
-    this.apiKey = result.geminiApiKey || '';
-    this.systemInstructions = result.systemInstructions || t('defaultSystemInstructions');
-    this.aiProvider = result.aiProvider || 'gemini';
-    this.deepseekApiKey = result.deepseekApiKey || '';
-    this.deepseekModel = result.deepseekModel || 'deepseek-v4-flash';
+  setupMediaCaptureBridge() {
+    window.addEventListener('message', event => {
+      if (event.source !== window || event.origin !== location.origin) return;
+      const message = event.data;
+      if (!message || message.source !== MEDIA_HOOK_SOURCE) return;
 
-    // Initialize chat tracking
-    this.initializeChatTracking();
+      if (message.type === 'hook-ready') {
+        this.mediaHookReady = true;
+        return;
+      }
+
+      // The MAIN-world hook sees WhatsApp's decrypted Blob before its temporary
+      // object URL is revoked. Retain context-tagged videos immediately instead
+      // of relying solely on a second /stream/video request, which is not
+      // consistently reusable for every historical message.
+      if (message.type === 'video-available') {
+        if (message.contextKey && message.blob instanceof Blob && message.blob.size >= 128) {
+          this.videoBlobCache.set(message.contextKey, {
+            blob: message.blob,
+            src: message.url || '',
+            mimeType: message.mimeType || message.blob.type || 'video/mp4'
+          });
+        }
+        return;
+      }
+
+      if (message.type !== 'video-blob' || !message.requestId) return;
+      const pending = this.pendingVideoCaptureRequests.get(message.requestId);
+      if (!pending) return;
+      this.pendingVideoCaptureRequests.delete(message.requestId);
+      clearTimeout(pending.timer);
+
+      if (message.blob instanceof Blob && message.blob.size >= 128) {
+        pending.resolve({
+          blob: message.blob,
+          src: message.url || '',
+          mimeType: message.mimeType || message.blob.type || 'video/mp4'
+        });
+      } else {
+        pending.resolve(null);
+      }
+    });
+
+    window.postMessage({ source: MEDIA_CONTENT_SOURCE, type: 'ping-media-hook' }, location.origin);
+  }
+
+  async init() {
+    // Keep API keys on this device. Older releases stored them in sync storage;
+    // migrate those values once without forcing existing users to re-enter them.
+    const [settings, localSecrets] = await Promise.all([
+      chrome.storage.sync.get([
+        'geminiApiKey', 'systemInstructions', 'aiProvider', 'deepseekApiKey', 'deepseekModel'
+      ]),
+      chrome.storage.local.get(['geminiApiKey', 'deepseekApiKey'])
+    ]);
+    this.apiKey = localSecrets.geminiApiKey || settings.geminiApiKey || '';
+    this.systemInstructions = settings.systemInstructions || t('defaultSystemInstructions');
+    this.aiProvider = settings.aiProvider || 'gemini';
+    this.deepseekApiKey = localSecrets.deepseekApiKey || settings.deepseekApiKey || '';
+    this.deepseekModel = settings.deepseekModel || 'deepseek-v4-flash';
+    if (settings.geminiApiKey || settings.deepseekApiKey) {
+      try {
+        await chrome.storage.local.set({
+          geminiApiKey: this.apiKey,
+          deepseekApiKey: this.deepseekApiKey
+        });
+        await chrome.storage.sync.remove(['geminiApiKey', 'deepseekApiKey']);
+      } catch (error) {
+        console.error('Unable to migrate API keys to local storage:', error);
+        this.showCacheStorageWarning('warnCacheStorageFailed');
+      }
+    }
+
+    // Initialize chat tracking before scanning the conversation. This prevents a
+    // late cache load from replacing messages that were just scanned.
+    await this.initializeChatTracking();
     
     // Wait for WhatsApp to load
     this.waitForWhatsApp();
   }
 
-  initializeChatTracking() {
-    // Get current chat identifier
-    this.chatId = this.getCurrentChatId();
-    
-    // Load cached messages for this chat
-    this.loadCachedMessages();
-    
-    // Set up scroll monitoring
+  async initializeChatTracking() {
+    await this.switchToChat(this.getCurrentChatId(), true);
+    this.setupChatChangeMonitoring();
     this.setupScrollMonitoring();
   }
 
   getCurrentChatId() {
-    // Try to get a unique identifier for the current chat
+    // WhatsApp normally exposes a stable data-id on the selected chat-list item.
+    // Prefer it over a display name so two chats with the same title never share
+    // a cache. The title is only a fallback for WhatsApp DOM variants that don't
+    // expose this identifier.
+    const activeChatSelectors = [
+      '#pane-side [aria-selected="true"]',
+      '[data-testid="chat-list"] [aria-selected="true"]',
+      '[role="listbox"] [aria-selected="true"]'
+    ];
+
+    for (const selector of activeChatSelectors) {
+      const activeChat = document.querySelector(selector);
+      if (!activeChat) continue;
+
+      const chatElement = activeChat.closest('[data-id], [data-jid], [data-chat-id]') || activeChat;
+      for (const attribute of ['data-id', 'data-jid', 'data-chat-id']) {
+        const value = chatElement.getAttribute(attribute);
+        if (value) return `id:${value}`;
+      }
+    }
+
+    // Try to get an identifier from the active conversation header before
+    // falling back to the visible title.
     const chatTitle = document.querySelector('[data-testid="conversation-info-header-chat-title"]') ||
                      document.querySelector('header span[title]') ||
                      document.querySelector('header span[dir="auto"]');
     
     if (chatTitle) {
-      return chatTitle.textContent?.trim() || 'unknown-chat';
+      const headerElement = chatTitle.closest('[data-id], [data-jid], [data-chat-id]') || chatTitle;
+      for (const attribute of ['data-id', 'data-jid', 'data-chat-id']) {
+        const value = headerElement.getAttribute(attribute);
+        if (value) return `id:${value}`;
+      }
+
+      const title = chatTitle.textContent?.trim();
+      if (title) return `title:${title}`;
     }
     
-    // Fallback: use URL or timestamp
-    return window.location.href.split('/').pop() || 'chat-' + Date.now();
+    return 'no-active-chat';
   }
 
-  async loadCachedMessages() {
+  getCacheKey(chatId = this.chatId) {
+    return `whatsapp_messages_v${MESSAGE_CACHE_SCHEMA_VERSION}_${encodeURIComponent(chatId)}`;
+  }
+
+  showCacheStorageWarning(messageKey = 'warnCacheStorageLimit') {
+    if (this.cacheStorageWarningsShown.has(messageKey)) return;
+    this.cacheStorageWarningsShown.add(messageKey);
+    console.warn(t(messageKey));
+    if (document.body) this.showNotification(t(messageKey), 'warning');
+  }
+
+  openMediaDatabase() {
+    if (this.mediaDatabasePromise) return this.mediaDatabasePromise;
+    if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+
+    this.mediaDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(MEDIA_DATABASE_NAME, MEDIA_DATABASE_VERSION);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        const store = database.objectStoreNames.contains(MEDIA_STORE_NAME)
+          ? request.transaction.objectStore(MEDIA_STORE_NAME)
+          : database.createObjectStore(MEDIA_STORE_NAME, { keyPath: 'key' });
+        const metadataStore = database.objectStoreNames.contains(MEDIA_METADATA_STORE_NAME)
+          ? request.transaction.objectStore(MEDIA_METADATA_STORE_NAME)
+          : database.createObjectStore(MEDIA_METADATA_STORE_NAME, { keyPath: 'key' });
+        if (!store.indexNames.contains('chatId')) store.createIndex('chatId', 'chatId', { unique: false });
+        if (!store.indexNames.contains('messageKey')) store.createIndex('messageKey', 'messageKey', { unique: false });
+        if (request.oldVersion < 2) {
+          const cursorRequest = store.openCursor();
+          cursorRequest.onsuccess = () => {
+            const cursor = cursorRequest.result;
+            if (!cursor) return;
+            const { key, size, updatedAt } = cursor.value;
+            metadataStore.put({ key, size: size || 0, updatedAt: updatedAt || 0 });
+            cursor.continue();
+          };
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Unable to open the media database'));
+      request.onblocked = () => reject(new Error('The media database upgrade was blocked'));
+    }).catch(error => {
+      console.warn('Persistent media cache is unavailable:', error);
+      this.mediaDatabasePromise = null;
+      return null;
+    });
+    return this.mediaDatabasePromise;
+  }
+
+  getPersistentMediaMetadata(database) {
+    return new Promise((resolve, reject) => {
+      const request = database.transaction(MEDIA_METADATA_STORE_NAME, 'readonly')
+        .objectStore(MEDIA_METADATA_STORE_NAME)
+        .getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  getPersistentMessageKey(message, chatId = message?.chatId || this.chatId) {
+    if (message?.persistentMessageKey) return message.persistentMessageKey;
+    const identity = message?.messageId
+      ? `id:${message.messageId}`
+      : [message?.timestamp, message?.sender, String(message?.text || '').replace(/\s+/g, ' ').trim()]
+          .map(value => String(value || ''))
+          .join('|');
+    const key = `${chatId || 'no-chat'}|${identity}`;
+    if (message) message.persistentMessageKey = key;
+    return key;
+  }
+
+  getPersistentMediaSlot(media, role = 'attachment', index = 0) {
+    return `${role}|${media?.kind || 'unknown'}|${index}`;
+  }
+
+  async getPersistentMediaForMessage(message) {
     try {
-      const cacheKey = `whatsapp_messages_${this.chatId}`;
+      const database = await this.openMediaDatabase();
+      if (!database) return [];
+      const messageKey = this.getPersistentMessageKey(message);
+      return await new Promise((resolve, reject) => {
+        const request = database.transaction(MEDIA_STORE_NAME, 'readonly')
+          .objectStore(MEDIA_STORE_NAME)
+          .index('messageKey')
+          .getAll(messageKey);
+        request.onsuccess = () => resolve((request.result || []).filter(record => record.blob instanceof Blob));
+        request.onerror = () => reject(request.error);
+      });
+    } catch (error) {
+      console.warn('Unable to read persistent media:', error);
+      return [];
+    }
+  }
+
+  attachPersistentMediaReference(message, record) {
+    const reference = {
+      key: record.key,
+      slot: record.slot,
+      kind: record.kind,
+      role: record.role,
+      index: record.index,
+      mimeType: record.mimeType,
+      size: record.size,
+      isVideoPoster: record.isVideoPoster
+    };
+    const attach = target => {
+      if (!target) return;
+      target.persistentMessageKey = record.messageKey;
+      const references = Array.isArray(target.mediaRefs) ? target.mediaRefs : [];
+      target.mediaRefs = [...references.filter(item => item.key !== record.key), reference];
+    };
+
+    attach(message);
+    const cached = Array.from(this.messageCache.values()).find(candidate =>
+      candidate === message ||
+      (message.messageId && candidate.messageId === message.messageId) ||
+      candidate.persistentMessageKey === record.messageKey ||
+      this.areSameMessage(candidate, message)
+    );
+    if (cached !== message) attach(cached);
+  }
+
+  async persistMediaAsset(message, media, blob, { role = 'attachment', index = 0 } = {}) {
+    if (!(blob instanceof Blob) || blob.size < 128 || !message) return null;
+    if (blob.size > MEDIA_CACHE_MAX_ASSET_BYTES) {
+      this.showCacheStorageWarning('warnMediaTooLarge');
+      return null;
+    }
+    try {
+      const database = await this.openMediaDatabase();
+      if (!database) return null;
+      const messageKey = this.getPersistentMessageKey(message);
+      const slot = this.getPersistentMediaSlot(media, role, index);
+      const record = {
+        key: `${messageKey}|${slot}`,
+        chatId: message.chatId || this.chatId || 'no-chat',
+        messageKey,
+        slot,
+        role,
+        index,
+        kind: media?.kind || (/^video\//i.test(blob.type) ? 'video' : 'image'),
+        mimeType: media?.mimeType || blob.type || '',
+        source: media?.src || '',
+        size: blob.size,
+        isVideoPoster: Boolean(media?.isVideoPoster),
+        updatedAt: Date.now(),
+        blob
+      };
+      const existingRecords = await this.getPersistentMediaMetadata(database);
+      const mediaPlan = planMediaEvictions(existingRecords, record, MEDIA_CACHE_TOTAL_BUDGET_BYTES);
+      const evictionKeys = mediaPlan.removeKeys;
+      const projectedBytes = mediaPlan.projectedBytes;
+      if (projectedBytes > MEDIA_CACHE_TOTAL_BUDGET_BYTES) {
+        this.showCacheStorageWarning('warnCacheStorageLimit');
+        return null;
+      }
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction([MEDIA_STORE_NAME, MEDIA_METADATA_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(MEDIA_STORE_NAME);
+        const metadataStore = transaction.objectStore(MEDIA_METADATA_STORE_NAME);
+        evictionKeys.forEach(key => {
+          store.delete(key);
+          metadataStore.delete(key);
+        });
+        store.put(record);
+        metadataStore.put({ key: record.key, size: record.size, updatedAt: record.updatedAt });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('Media cache transaction aborted'));
+      });
+      if (evictionKeys.length > 0) this.showCacheStorageWarning('warnMediaCacheEvicted');
+      this.attachPersistentMediaReference(message, record);
+      this.scheduleCacheSave();
+      return record;
+    } catch (error) {
+      console.warn('Unable to persist media attachment:', error);
+      this.showCacheStorageWarning('warnCacheStorageFailed');
+      return null;
+    }
+  }
+
+  async clearPersistentMediaForChat(chatId = this.chatId) {
+    try {
+      const database = await this.openMediaDatabase();
+      if (!database) return;
+      const keys = await new Promise((resolve, reject) => {
+        const request = database.transaction(MEDIA_STORE_NAME, 'readonly')
+          .objectStore(MEDIA_STORE_NAME)
+          .index('chatId')
+          .getAllKeys(chatId || 'no-chat');
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+      if (keys.length === 0) return;
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction([MEDIA_STORE_NAME, MEDIA_METADATA_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(MEDIA_STORE_NAME);
+        const metadataStore = transaction.objectStore(MEDIA_METADATA_STORE_NAME);
+        keys.forEach(key => {
+          store.delete(key);
+          metadataStore.delete(key);
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('Media cache cleanup aborted'));
+      });
+    } catch (error) {
+      console.warn('Unable to clear persistent media cache:', error);
+    }
+  }
+
+  async loadCachedMessages(chatId) {
+    try {
+      const cacheKey = this.getCacheKey(chatId);
       const result = await chrome.storage.local.get([cacheKey]);
       
       if (result[cacheKey]) {
-        const cachedData = JSON.parse(result[cacheKey]);
-        this.messageCache = new Map(cachedData);
-        console.log(`Loaded ${this.messageCache.size} cached messages for chat: ${this.chatId}`);
-        
-        // Update the UI indicator after loading
-        setTimeout(() => {
-          this.updateCacheIndicator();
-        }, 1000);
+        const cachedData = typeof result[cacheKey] === 'string'
+          ? JSON.parse(result[cacheKey])
+          : result[cacheKey];
+        if (Array.isArray(cachedData)) return new Map(cachedData);
+        if (Array.isArray(cachedData?.entries)) {
+          if (cachedData.truncated) this.showCacheStorageWarning('warnCacheHistoryTruncated');
+          return new Map(cachedData.entries);
+        }
       }
+      return new Map();
     } catch (error) {
       console.error('Error loading cached messages:', error);
+      this.showCacheStorageWarning('warnCacheStorageFailed');
+      return new Map();
     }
   }
 
-  async saveCachedMessages() {
+  async saveCachedMessages(chatId = this.chatId, cache = this.messageCache) {
     try {
-      const cacheKey = `whatsapp_messages_${this.chatId}`;
-      const dataToStore = Array.from(this.messageCache.entries());
+      const cacheKey = this.getCacheKey(chatId);
+      // DOM nodes and WhatsApp blob URLs are session-only. Persisting either
+      // makes a later export use stale media references, so only retain the
+      // message metadata and recapture attachments from the rendered bubble.
+      const dataToStore = Array.from(cache.entries()).map(([key, message]) => [key, {
+        ...message,
+        element: undefined,
+        media: [],
+        // Blob URLs expire with the page, but WhatsApp's quoted-media preview
+        // also includes a compact data:image source. Keep one bounded preview
+        // so quoted images still export after a page refresh or cache reload.
+        quote: message.quote ? {
+          ...message.quote,
+          media: this.getPersistentQuotedMedia(message.quote.media)
+        } : null
+      }]);
       
-      await chrome.storage.local.set({
-        [cacheKey]: JSON.stringify(dataToStore)
-      });
+      const envelope = createBoundedMessageEnvelope(
+        dataToStore,
+        MESSAGE_CACHE_SCHEMA_VERSION,
+        MESSAGE_CACHE_MAX_BYTES_PER_CHAT
+      );
+
+      const allStored = await chrome.storage.local.get(null);
+      const oldItemBytes = getSerializedByteLength(allStored[cacheKey]);
+      let projectedBytes = await chrome.storage.local.getBytesInUse(null);
+      projectedBytes = projectedBytes - oldItemBytes + getSerializedByteLength(envelope);
+      if (projectedBytes > MESSAGE_CACHE_TOTAL_BUDGET_BYTES) {
+        const candidates = Object.entries(allStored)
+          .filter(([key]) => key !== cacheKey && key.startsWith(`whatsapp_messages_v${MESSAGE_CACHE_SCHEMA_VERSION}_`))
+          .map(([key, value]) => {
+            let parsed = value;
+            try {
+              if (typeof value === 'string') parsed = JSON.parse(value);
+            } catch {
+              parsed = null;
+            }
+            return { key, updatedAt: parsed?.updatedAt || 0, bytes: getSerializedByteLength(value) };
+          });
+        const evictionPlan = chooseOldestEvictions(
+          candidates,
+          projectedBytes,
+          MESSAGE_CACHE_TOTAL_BUDGET_BYTES
+        );
+        const removeKeys = evictionPlan.removeKeys;
+        projectedBytes = evictionPlan.projectedBytes;
+        if (removeKeys.length > 0) {
+          await chrome.storage.local.remove(removeKeys);
+          this.showCacheStorageWarning('warnCacheChatsEvicted');
+        }
+      }
+      if (projectedBytes > MESSAGE_CACHE_TOTAL_BUDGET_BYTES) {
+        throw new Error('Message cache storage budget exceeded');
+      }
+
+      await chrome.storage.local.set({ [cacheKey]: envelope });
+
+      if (envelope.truncated) this.showCacheStorageWarning('warnCacheHistoryTruncated');
       
-      console.log(`Saved ${this.messageCache.size} messages to cache`);
+      console.log(`Saved ${envelope.entries.length} messages to persistent cache`);
     } catch (error) {
       console.error('Error saving cached messages:', error);
+      this.showCacheStorageWarning('warnCacheStorageFailed');
+      return false;
     }
+    return true;
+  }
+
+  async switchToChat(nextChatId, force = false) {
+    if (!nextChatId || (!force && (nextChatId === 'no-active-chat' || nextChatId === this.chatId || nextChatId === this.pendingChatId))) return;
+
+    if (this.historySync?.active && nextChatId !== this.historySync.chatId) {
+      this.cancelHistorySync('chat-change');
+    }
+
+    const loadSequence = ++this.chatLoadSequence;
+    const previousChatId = this.chatId;
+    const previousCache = this.messageCache;
+    this.pendingChatId = nextChatId;
+    this.isSwitchingChat = true;
+    let switched = false;
+
+    try {
+      if (previousChatId && previousChatId !== nextChatId) {
+        // Pass a snapshot so an asynchronous write can never persist messages
+        // from the chat we are about to enter under the previous chat's key.
+        await this.saveCachedMessages(previousChatId, new Map(previousCache));
+      }
+
+      const cachedMessages = await this.loadCachedMessages(nextChatId);
+      if (loadSequence !== this.chatLoadSequence) return;
+
+      this.chatId = nextChatId;
+      this.messageCache = cachedMessages;
+      if (previousChatId && previousChatId !== nextChatId) {
+        this.videoBlobCache.clear();
+        this.historyVideoCaptureAttempts.clear();
+      }
+      this.updateCacheIndicator();
+      this.setupScrollMonitoring();
+      switched = true;
+      console.log(`Switched message cache to chat: ${nextChatId}`);
+    } finally {
+      if (loadSequence === this.chatLoadSequence) {
+        this.pendingChatId = null;
+        this.isSwitchingChat = false;
+        if (switched) this.refreshMessageCache();
+      }
+    }
+  }
+
+  setupChatChangeMonitoring() {
+    if (this.chatSwitchObserver || !document.body) return;
+
+    const checkForChatChange = () => {
+      clearTimeout(this.chatSwitchTimer);
+      this.chatSwitchTimer = setTimeout(() => {
+        const nextChatId = this.getCurrentChatId();
+        if (nextChatId !== this.chatId) {
+          this.switchToChat(nextChatId);
+        }
+      }, 250);
+    };
+
+    this.chatSwitchObserver = new MutationObserver(checkForChatChange);
+    this.chatSwitchObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
   }
 
   setupScrollMonitoring() {
     const chatContainer = this.getChatContainer();
     if (!chatContainer) return;
 
+    if (chatContainer === this.scrollContainer) return;
+
+    if (this.scrollContainer && this.scrollHandler) {
+      this.scrollContainer.removeEventListener('scroll', this.scrollHandler);
+    }
+
     // Monitor scroll events to refresh message cache
-    chatContainer.addEventListener('scroll', this.debounce(() => {
+    this.scrollContainer = chatContainer;
+    this.scrollHandler = this.debounce(() => {
       this.refreshMessageCache();
-    }, 500));
+    }, 500);
+    chatContainer.addEventListener('scroll', this.scrollHandler);
 
     // Initial message scan
     setTimeout(() => {
@@ -182,6 +660,7 @@ class WhatsAppAI {
           ${cacheSize > 0 ? `<div class="cache-indicator">${cacheSize}</div>` : ''}
         </div>
         <div class="ai-menu" id="ai-menu" style="display: none;">
+          <div class="history-sync-status" id="history-sync-status" hidden></div>
           <button id="export-conversation">${t('menuExport')}</button>
           <button id="generate-response">${t('menuGenerate')}</button>
           <button id="load-full-history">${t('menuLoadHistory')}</button>
@@ -207,6 +686,7 @@ class WhatsAppAI {
       if (settingsBtn) settingsBtn.addEventListener('click', this.openSettings.bind(this));
       
       console.log('WhatsApp AI: UI setup complete');
+      this.updateHistorySyncUI();
       this.showNotification(t('notifyActivated'), 'success');
     } catch (error) {
       console.error('WhatsApp AI: Error setting up event listeners:', error);
@@ -247,7 +727,8 @@ class WhatsAppAI {
     return node.classList && (
       node.classList.contains('message-in') || 
       node.classList.contains('message-out') ||
-      node.querySelector('.message-in, .message-out')
+      node.matches('[data-testid="msg-container"], [data-testid^="conv-msg-"]') ||
+      node.querySelector('.message-in, .message-out, [data-testid="msg-container"], [data-testid^="conv-msg-"]')
     );
   }
 
@@ -255,22 +736,18 @@ class WhatsAppAI {
     // First, refresh cache with currently visible messages
     this.refreshMessageCache();
     
-    // Convert cached messages to array and sort by timestamp
-    const allCachedMessages = Array.from(this.messageCache.values());
+    // A cache can briefly contain an older fallback-key record alongside the
+    // same message's stable WhatsApp id. Collapse only those legacy copies
+    // before sorting; two distinct stable ids are always kept.
+    const allCachedMessages = this.deduplicateMessages(Array.from(this.messageCache.values()));
     
     if (allCachedMessages.length === 0) {
       console.log('No cached messages found, scanning current view...');
-      const currentMessages = this.scanVisibleMessages();
-      return currentMessages;
+      return this.sortMessages(this.deduplicateMessages(this.scanVisibleMessages()));
     }
-    
-    // Sort messages by timestamp (parse time for proper sorting)
-    const sortedMessages = allCachedMessages.sort((a, b) => {
-      const timeA = this.parseTimestamp(a.timestamp);
-      const timeB = this.parseTimestamp(b.timestamp);
-      return timeA - timeB;
-    });
-    
+
+    const sortedMessages = this.sortMessages(allCachedMessages);
+
     // For export, return ALL messages. For AI processing, return recent 50
     if (forExport) {
       console.log(`Exporting all ${sortedMessages.length} cached messages`);
@@ -282,59 +759,212 @@ class WhatsAppAI {
     }
   }
 
+  sortMessages(messages) {
+    for (const message of messages) {
+      const shortDate = String(message?.timestamp || '').match(/(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})/);
+      if (!shortDate) continue;
+      const first = Number(shortDate[1]);
+      const second = Number(shortDate[2]);
+      if (first > 12 && second <= 12) {
+        this.shortDateOrder = 'dmy';
+        break;
+      }
+      if (second > 12 && first <= 12) {
+        this.shortDateOrder = 'mdy';
+        break;
+      }
+    }
+    return [...messages].sort((a, b) => {
+      const timeA = this.parseTimestamp(a.timestamp);
+      const timeB = this.parseTimestamp(b.timestamp);
+      return timeA - timeB;
+    });
+  }
+
   parseTimestamp(timestampStr) {
     try {
-      // Parse timestamp like "09:21, 19/08/2025" or just "09:21"
-      const match = timestampStr.match(/(\d{1,2}):(\d{2})(?:,\s*(\d{1,2})\/(\d{1,2})\/(\d{4}))?/);
-      if (!match) return Date.now();
-      
-      const [, hours, minutes, day, month, year] = match;
-      
-      if (year) {
-        // Full timestamp with date
-        return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hours), parseInt(minutes)).getTime();
+      const value = String(timestampStr || '').trim();
+      const timeMatch = value.match(/(\d{1,2}):(\d{2})(?:\s*(:\s*\d{2}))?\s*(AM|PM|上午|下午)?/i);
+      if (!timeMatch) return Number.MAX_SAFE_INTEGER;
+
+      let hours = Number.parseInt(timeMatch[1], 10);
+      const minutes = Number.parseInt(timeMatch[2], 10);
+      const seconds = timeMatch[3] ? Number.parseInt(timeMatch[3].replace(':', ''), 10) : 0;
+      const meridiem = (timeMatch[4] || '').toLowerCase();
+      if ((meridiem === 'pm' || meridiem === '下午') && hours < 12) hours += 12;
+      if ((meridiem === 'am' || meridiem === '上午') && hours === 12) hours = 0;
+
+      let year;
+      let month;
+      let day;
+
+      // e.g. "10:43, 2026年8月21日" (Chinese WhatsApp UI)
+      const chineseDate = value.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+      // e.g. "10:43, 21/08/2026", "10:43 AM, 8/21/2026" or "10:43, 2026-08-21"
+      const shortDate = value.match(/(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})/);
+      const ymdDate = value.match(/(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})/);
+
+      if (chineseDate) {
+        [, year, month, day] = chineseDate.map(Number);
+      } else if (ymdDate) {
+        [, year, month, day] = ymdDate.map(Number);
+      } else if (shortDate) {
+        const first = Number(shortDate[1]);
+        const second = Number(shortDate[2]);
+        year = Number(shortDate[3]);
+        let monthFirst = first <= 12 && second > 12;
+        if (first > 12 && second <= 12) this.shortDateOrder = 'dmy';
+        if (second > 12 && first <= 12) this.shortDateOrder = 'mdy';
+        if (first <= 12 && second <= 12 && this.shortDateOrder) {
+          monthFirst = this.shortDateOrder === 'mdy';
+        } else if (first <= 12 && second <= 12) {
+          try {
+            const order = new Intl.DateTimeFormat(undefined, {
+              year: 'numeric', month: 'numeric', day: 'numeric'
+            }).formatToParts(new Date(2001, 10, 22)).filter(part =>
+              ['year', 'month', 'day'].includes(part.type)
+            ).map(part => part.type);
+            monthFirst = order.indexOf('month') < order.indexOf('day');
+          } catch (error) {
+            monthFirst = false;
+          }
+        }
+        if (monthFirst) {
+          month = first;
+          day = second;
+        } else {
+          day = first;
+          month = second;
+        }
       } else {
-        // Just time, assume today
         const today = new Date();
-        return new Date(today.getFullYear(), today.getMonth(), today.getDate(), parseInt(hours), parseInt(minutes)).getTime();
+        year = today.getFullYear();
+        month = today.getMonth() + 1;
+        day = today.getDate();
       }
+
+      const parsedDate = new Date(year, month - 1, day, hours, minutes, seconds);
+      const result = parsedDate.getTime();
+      const validDate = parsedDate.getFullYear() === year && parsedDate.getMonth() === month - 1 &&
+                        parsedDate.getDate() === day && parsedDate.getHours() === hours &&
+                        parsedDate.getMinutes() === minutes;
+      return Number.isNaN(result) || !validDate ? Number.MAX_SAFE_INTEGER : result;
     } catch (error) {
-      return Date.now();
+      return Number.MAX_SAFE_INTEGER;
     }
+  }
+
+  parseDateInput(value, { endExclusive = false } = {}) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(year, month - 1, day + (endExclusive ? 1 : 0));
+    const expected = new Date(year, month - 1, day);
+    if (expected.getFullYear() !== year || expected.getMonth() !== month - 1 || expected.getDate() !== day) {
+      return null;
+    }
+    return date.getTime();
+  }
+
+  createExportDateRange(startDate, endDate) {
+    if (!startDate && !endDate) return null;
+    const startMs = this.parseDateInput(startDate);
+    const endExclusiveMs = this.parseDateInput(endDate, { endExclusive: true });
+    if (startMs === null || endExclusiveMs === null || startMs >= endExclusiveMs) return null;
+    return { startDate, endDate, startMs, endExclusiveMs };
+  }
+
+  getRangeTimestamp(timestamp) {
+    if (!this.getDatePart(timestamp)) return null;
+    const parsed = this.parseTimestamp(timestamp);
+    return parsed === Number.MAX_SAFE_INTEGER ? null : parsed;
+  }
+
+  isMessageInDateRange(message, range) {
+    if (!range) return true;
+    const timestamp = this.getRangeTimestamp(message?.timestamp);
+    return timestamp !== null && timestamp >= range.startMs && timestamp < range.endExclusiveMs;
+  }
+
+  filterMessagesByDateRange(messages, range) {
+    return range ? messages.filter(message => this.isMessageInDateRange(message, range)) : messages;
+  }
+
+  hasReachedRangeStart(snapshot, range) {
+    if (!range?.startMs) return false;
+    const oldestTimestamp = this.getRangeTimestamp(snapshot?.oldestTimestamp);
+    return oldestTimestamp !== null && oldestTimestamp < range.startMs;
   }
 
   scanVisibleMessages() {
     const messages = [];
-    
-    // Find all elements with data-pre-plain-text (this is the most reliable identifier)
-    const messageElements = document.querySelectorAll('[data-pre-plain-text]');
-    
-    messageElements.forEach((element, index) => {
+    let lastKnownDate = '';
+    let lastKnownSender = '';
+
+    // The pre-plain-text node exists for ordinary text messages, but WhatsApp
+    // can omit it from photo/video-only bubbles. Scan message *bubbles* first
+    // so every attachment has a chance to be exported.
+    const messageRoots = new Set();
+    document.querySelectorAll('.message-in, .message-out, [data-testid="msg-container"]').forEach(node => {
+      // data-testid="msg-container" can be nested inside message-in/out.
+      // Prefer the enclosing bubble so one WhatsApp message yields one scan.
+      const root = node.closest('[data-id], [data-message-id]') ||
+                   node.closest('.message-in, .message-out') ||
+                   node;
+      messageRoots.add(root);
+    });
+
+    Array.from(messageRoots).forEach((element, index) => {
       try {
-        const preText = element.getAttribute('data-pre-plain-text');
-        if (!preText) return;
-
-        // Parse the pre-text to extract timestamp and sender
-        const match = preText.match(/\[([^\]]+)\]\s*(.+?):\s*$/);
-        if (!match) return;
-
-        const [, timestampStr, sender] = match;
-        
-        // Extract message text
-        const messageText = this.extractMessageTextFromElement(element);
-        if (!messageText || messageText.trim() === '') return;
-
-        // Determine message type
+        const preTextElement = element.matches('[data-pre-plain-text]')
+          ? element
+          : element.querySelector('[data-pre-plain-text]');
+        const preText = preTextElement?.getAttribute('data-pre-plain-text') || '';
+        const preTextMatch = preText.match(/\[([^\]]+)\]\s*(.+?):\s*$/);
         const isOutgoing = this.isOutgoingMessageElement(element);
-        
+        let timestampStr = preTextMatch?.[1] || this.extractTimestamp(element);
+        let sender = preTextMatch?.[2] || this.extractSender(element, !isOutgoing);
+
+        const messageDate = this.getDatePart(timestampStr);
+        if (messageDate) {
+          lastKnownDate = messageDate;
+        } else if (lastKnownDate && /^\d{1,2}:\d{2}/.test(timestampStr)) {
+          // Media-only bubbles sometimes expose only "13:27". In WhatsApp's
+          // DOM they remain in chronological order, so inherit the date from
+          // the preceding fully-labelled message on the same day.
+          timestampStr = `${timestampStr}, ${lastKnownDate}`;
+        }
+
+        if (sender === 'Contact') {
+          const phone = (element.textContent || '').match(/\+\d[\d\s()\-]{6,}\d/);
+          sender = phone?.[0]?.replace(/\s+/g, ' ').trim() || lastKnownSender || sender;
+        }
+        if (sender && sender !== 'Contact') lastKnownSender = sender;
+
+        // Extract text and media independently. A video or image message may
+        // have no caption, but it still needs an entry in the export.
+        const quote = this.extractQuotedMessage(element);
+        const messageText = this.extractMessageText(element, { excludeQuoted: true }) ||
+                            this.extractMessageTextFromElement(element, { excludeQuoted: true });
+        const media = this.extractMediaFromElement(element, { excludeQuoted: true });
+        const mediaHint = this.getMediaHint(element);
+        if (!messageText?.trim() && media.length === 0 && !mediaHint) return;
+
         // Create message object
         const message = {
           id: index,
-          text: messageText.trim(),
+          text: messageText?.trim() || '',
           timestamp: timestampStr,
           sender: sender,
           type: isOutgoing ? 'outgoing' : 'incoming',
+          chatId: this.chatId,
+          media,
+          mediaHint,
+          quote,
           preText: preText,
+          messageId: this.getStableMessageId(element),
           element: element
         };
 
@@ -347,13 +977,239 @@ class WhatsAppAI {
     return messages;
   }
 
-  createMessageId(message) {
-    // Create unique ID using timestamp, sender, and first 50 chars of text
-    const textPreview = message.text.substring(0, 50).replace(/\s+/g, ' ');
-    return `${message.timestamp}|${message.sender}|${textPreview}`;
+  getStableMessageId(element) {
+    for (const node of [element, element.closest('[data-id], [data-message-id], [data-msg-id]')]) {
+      if (!node) continue;
+      for (const attribute of ['data-id', 'data-message-id', 'data-msg-id']) {
+        const value = node.getAttribute(attribute);
+        if (value) return value;
+      }
+    }
+    return '';
   }
 
-  extractMessageTextFromElement(element) {
+  getMediaHint(element) {
+    if (element.querySelector('[data-testid="video-content"], [data-testid="media-play"], [data-testid="msg-video"]')) {
+      return 'video';
+    }
+    if (element.querySelector('img, [style*="background-image"]')) return 'image';
+    return '';
+  }
+
+  getDatePart(timestamp) {
+    const value = String(timestamp || '');
+    const chineseDate = value.match(/(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)/);
+    if (chineseDate) return chineseDate[1];
+
+    const ymdDate = value.match(/(\d{4}[/.\-]\d{1,2}[/.\-]\d{1,2})/);
+    if (ymdDate) return ymdDate[1];
+
+    const dmyDate = value.match(/(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4})/);
+    return dmyDate ? dmyDate[1] : '';
+  }
+
+  findQuotedMessageContainer(element) {
+    const selectors = [
+      '[data-testid="quoted-message"]',
+      '[data-testid="quoted-message-container"]',
+      '[data-testid*="quoted" i]',
+      '[data-testid*="reply" i]'
+    ];
+
+    for (const selector of selectors) {
+      const candidate = element.querySelector(selector);
+      if (candidate && candidate !== element) return candidate;
+    }
+    return null;
+  }
+
+  extractQuotedMessage(element) {
+    const container = this.findQuotedMessageContainer(element);
+    if (!container) return null;
+
+    const senderElement = container.querySelector('[data-testid="author"], [data-testid*="sender" i], [data-testid*="author" i]');
+    const sender = senderElement?.textContent?.trim() || '';
+    const media = this.extractMediaFromElement(container);
+    const mediaHint = this.getMediaHint(container);
+    const text = this.extractMessageText(container) || this.extractMessageTextFromElement(container);
+
+    return { sender, text, media, mediaHint };
+  }
+
+  extractMediaFromElement(element, { excludeQuoted = false } = {}) {
+    const media = [];
+    const seenSources = new Set();
+    const quotedContainer = excludeQuoted ? this.findQuotedMessageContainer(element) : null;
+
+    const addMediaSource = (src, node, kind, details = {}) => {
+      if (quotedContainer?.contains(node)) return;
+      if (!src || seenSources.has(src)) return;
+
+      seenSources.add(src);
+      media.push({
+        kind,
+        src,
+        ...details,
+        filename: node.getAttribute('data-filename') ||
+                  node.closest('[data-filename]')?.getAttribute('data-filename') ||
+                  node.getAttribute('alt') ||
+                  ''
+      });
+    };
+
+    const addMedia = (node, kind, details = {}) => {
+      const src = node.currentSrc || node.src || node.href ||
+                  node.getAttribute('src') || node.getAttribute('data-src') || node.getAttribute('data-url');
+      addMediaSource(src, node, kind, details);
+    };
+
+    // React may set image URLs after creating the node, so do not require a
+    // literal src attribute here. Exclude profile/avatar images that can live
+    // next to an incoming message bubble but are not attachments.
+    element.querySelectorAll('img').forEach(image => {
+      const context = [
+        image.getAttribute('data-testid'),
+        image.getAttribute('alt'),
+        image.className,
+        image.closest('[data-testid]')?.getAttribute('data-testid')
+      ].filter(Boolean).join(' ');
+      if (!/avatar|profile[-_ ]?picture|contact[-_ ]?photo/i.test(context)) {
+        addMedia(image, 'image', {
+          isVideoPoster: Boolean(image.closest('[data-testid="video-content"]'))
+        });
+      }
+    });
+
+    // Quoted WhatsApp media is rendered as CSS backgrounds rather than an
+    // <img>. The provider usually exposes both a compact data:image preview
+    // and a better blob URL; collect both and let the asset-quality filter
+    // retain the best usable copy.
+    element.querySelectorAll('[style*="background-image"]').forEach(backgroundNode => {
+      const backgroundImage = backgroundNode.style.backgroundImage || getComputedStyle(backgroundNode).backgroundImage;
+      for (const match of backgroundImage.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/g)) {
+        const source = match[2]?.trim();
+        if (/^(?:blob:|data:image\/|https?:\/\/)/i.test(source) && !/^data:image\/svg\+xml/i.test(source)) {
+          addMediaSource(source, backgroundNode, 'image', {
+            isVideoPoster: Boolean(backgroundNode.closest('[data-testid="video-content"]'))
+          });
+        }
+      }
+    });
+
+    // WhatsApp often adds the media source as a property after React creates
+    // the <video>, rather than as a literal src attribute. Query every video
+    // and source node so those downloaded videos are not skipped.
+    element.querySelectorAll('video, video source').forEach(video => addMedia(video, 'video'));
+
+    // Some video thumbnails expose the original media through a direct link.
+    // Only accept clear video/blob URLs, avoiding contact and profile links.
+    element.querySelectorAll('a[href]').forEach(link => {
+      const href = link.href || link.getAttribute('href') || '';
+      if (/^(blob:|data:video\/)|\.(mp4|webm|ogg|mov)(?:[?#]|$)/i.test(href)) {
+        addMedia(link, 'video');
+      }
+    });
+
+    return media;
+  }
+
+  getPersistentQuotedMedia(mediaItems = []) {
+    const candidates = mediaItems.filter(media =>
+      media?.kind === 'image' &&
+      /^data:image\/(?:jpeg|jpg|png|webp|gif);base64,/i.test(media.src || '') &&
+      media.src.length <= 256 * 1024
+    );
+    if (candidates.length === 0) return [];
+
+    // The longest Base64 candidate is normally WhatsApp's highest-quality
+    // embedded preview. Persist only one to keep local cache size bounded.
+    return [{ ...candidates.sort((a, b) => b.src.length - a.src.length)[0] }];
+  }
+
+  createMessageId(message) {
+    if (message.messageId) return `id:${message.messageId}`;
+
+    // Use the media source as part of the fallback too: media-only messages
+    // frequently share the same sender and minute.
+    const textPreview = String(message.text || '').substring(0, 50).replace(/\s+/g, ' ');
+    const mediaPreview = (message.media || []).map(media => media.src).join('|').slice(0, 200);
+    return `${message.timestamp}|${message.sender}|${textPreview}|${mediaPreview}`;
+  }
+
+  getMessageContentKey(message) {
+    const timestamp = String(message.timestamp || '').trim();
+    const sender = String(message.sender || '').trim();
+    const text = String(message.text || '').replace(/\s+/g, ' ').trim();
+    const media = (message.media || []).map(item => item.src).filter(Boolean).sort().join('|');
+    return { timestamp, sender, text, media };
+  }
+
+  areSameMessage(first, second) {
+    if (first.messageId && second.messageId) return first.messageId === second.messageId;
+
+    const firstKey = this.getMessageContentKey(first);
+    const secondKey = this.getMessageContentKey(second);
+    if (firstKey.timestamp !== secondKey.timestamp || firstKey.sender !== secondKey.sender) return false;
+
+    // This bridges a legacy cache entry (without a stable id) to the live
+    // WhatsApp record. Do not merge two records that both have stable ids.
+    if (firstKey.text && secondKey.text) return firstKey.text === secondKey.text;
+    return Boolean(firstKey.media && secondKey.media && firstKey.media === secondKey.media);
+  }
+
+  mergeMessageRecords(target, source) {
+    target.text = target.text || source.text || '';
+    const targetHasDate = Boolean(this.getDatePart(target.timestamp));
+    const sourceHasDate = Boolean(this.getDatePart(source.timestamp));
+    if (source.timestamp && (sourceHasDate || !targetHasDate)) {
+      target.timestamp = source.timestamp;
+    }
+    if (source.sender && (!target.sender || target.sender === 'Contact')) {
+      target.sender = source.sender;
+    }
+    target.preText = target.preText || source.preText || '';
+    target.messageId = target.messageId || source.messageId || '';
+    target.mediaHint = target.mediaHint || source.mediaHint || '';
+    target.chatId = target.chatId || source.chatId || this.chatId || '';
+    target.persistentMessageKey = target.persistentMessageKey || source.persistentMessageKey || '';
+    target.quote = source.quote || target.quote || null;
+    target.element = source.element instanceof Element ? source.element : target.element;
+
+    const seenSources = new Set();
+    target.media = [...(target.media || []), ...(source.media || [])].filter(media => {
+      if (!media?.src || seenSources.has(media.src)) return false;
+      seenSources.add(media.src);
+      return true;
+    });
+    const seenReferences = new Set();
+    target.mediaRefs = [...(target.mediaRefs || []), ...(source.mediaRefs || [])].filter(reference => {
+      if (!reference?.key || seenReferences.has(reference.key)) return false;
+      seenReferences.add(reference.key);
+      return true;
+    });
+    return target;
+  }
+
+  deduplicateMessages(messages) {
+    const uniqueMessages = [];
+
+    for (const message of messages) {
+      const duplicate = uniqueMessages.find(candidate => this.areSameMessage(candidate, message));
+      if (duplicate) {
+        this.mergeMessageRecords(duplicate, message);
+      } else {
+        uniqueMessages.push({
+          ...message,
+          media: [...(message.media || [])],
+          mediaRefs: [...(message.mediaRefs || [])]
+        });
+      }
+    }
+
+    return uniqueMessages;
+  }
+
+  extractMessageTextFromElement(element, { excludeQuoted = false } = {}) {
     // Extract text from the message element, handling multiple spans
     const textSelectors = [
       '.selectable-text span',
@@ -368,8 +1224,9 @@ class WhatsAppAI {
       const textElements = element.querySelectorAll(selector);
       if (textElements.length > 0) {
         textElements.forEach(el => {
+          if (excludeQuoted && this.findQuotedMessageContainer(element)?.contains(el)) return;
           const text = el.textContent?.trim();
-          if (text && !this.isTimestamp(text) && !this.isSystemMessage(text)) {
+          if (text && !this.isTimestamp(text) && !this.isSystemMessage(text, el) && !this.isUiChromeText(text)) {
             fullText += text + ' ';
           }
         });
@@ -377,14 +1234,13 @@ class WhatsAppAI {
       }
     }
 
-    // Fallback: get all text content
-    if (!fullText.trim()) {
-      const allText = element.textContent || '';
-      // Remove timestamp and system messages
-      fullText = allText.replace(/\d{1,2}:\d{2}/, '').replace(/Edited|Delivered|Read/, '').trim();
-    }
-
     return fullText.trim();
+  }
+
+  isUiChromeText(text) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!value) return true;
+    return /^(tail-(?:in|out)|video-pip|media-play|msg-video|ic-[\w-]+|wds-ic-[\w-]+|已转发|forwarded|照片|photo|图片|image|video)$/.test(value);
   }
 
   isOutgoingMessageElement(element) {
@@ -408,9 +1264,14 @@ class WhatsAppAI {
     return false;
   }
 
-  isSystemMessage(text) {
-    const systemKeywords = ['Edited', 'Delivered', 'Read', 'Seen', 'Online', 'Last seen', 'Typing'];
-    return systemKeywords.some(keyword => text.includes(keyword));
+  isSystemMessage(_text, element) {
+    if (!(element instanceof Element)) return false;
+    return Boolean(element.closest([
+      '[data-testid="system-message"]',
+      '[data-testid="notification-message"]',
+      '[data-testid="group-notification"]',
+      '[role="separator"]'
+    ].join(', ')));
   }
 
   updateCacheIndicator() {
@@ -439,112 +1300,526 @@ class WhatsAppAI {
   }
 
   refreshMessageCache() {
+    if (this.isSwitchingChat || this.chatId === 'no-active-chat') {
+      return { added: 0, total: this.messageCache.size };
+    }
+
     const visibleMessages = this.scanVisibleMessages();
     let newMessagesCount = 0;
+    let cacheChanged = false;
 
     visibleMessages.forEach(message => {
       const messageId = this.createMessageId(message);
-      if (!this.messageCache.has(messageId)) {
+      let existingKey = this.messageCache.has(messageId) ? messageId : null;
+      let cachedMessage = existingKey ? this.messageCache.get(existingKey) : null;
+
+      // When a live record now exposes a stable data-id, merge any matching
+      // legacy cache record rather than retaining a second exported message.
+      if (!cachedMessage) {
+        const legacyEntry = Array.from(this.messageCache.entries()).find(([, candidate]) =>
+          this.areSameMessage(candidate, message)
+        );
+        if (legacyEntry) {
+          [existingKey, cachedMessage] = legacyEntry;
+        }
+      }
+
+      if (!cachedMessage) {
         this.messageCache.set(messageId, message);
         newMessagesCount++;
+        cacheChanged = true;
+      } else {
+        this.mergeMessageRecords(cachedMessage, message);
+
+        // Replace the old fallback cache key with WhatsApp's stable id as soon
+        // as it becomes available. This prevents future re-render duplicates.
+        if (existingKey !== messageId && message.messageId) {
+          this.messageCache.delete(existingKey);
+          this.messageCache.set(messageId, cachedMessage);
+        }
+        cacheChanged = true;
       }
     });
 
-    if (newMessagesCount > 0) {
+    if (cacheChanged) {
       console.log(`Added ${newMessagesCount} new messages to cache. Total: ${this.messageCache.size}`);
-      this.saveCachedMessages();
+      this.scheduleCacheSave();
+    }
+    if (newMessagesCount > 0) {
       this.updateCacheIndicator(); // Update the UI indicator
+    }
+    return { added: newMessagesCount, total: this.messageCache.size };
+  }
+
+  scheduleCacheSave(delay = 500) {
+    clearTimeout(this.cacheSaveTimer);
+    this.cacheSaveTimer = setTimeout(() => {
+      this.cacheSaveTimer = null;
+      this.saveCachedMessages();
+    }, delay);
+  }
+
+  async flushCachedMessages() {
+    clearTimeout(this.cacheSaveTimer);
+    this.cacheSaveTimer = null;
+    await this.saveCachedMessages();
+  }
+
+  getLiveMediaItems(message) {
+    return [
+      ...this.getMediaForMessage(message).map((media, index) => ({
+        ...media,
+        role: 'attachment',
+        index
+      })),
+      ...this.getQuotedMediaForMessage(message).map((media, index) => ({
+        ...media,
+        role: 'quoted',
+        index
+      }))
+    ];
+  }
+
+  async captureVisibleHistoryMedia(sync) {
+    const visibleMessages = this.scanVisibleMessages().filter(message =>
+      (!sync.range || this.isMessageInDateRange(message, sync.range)) &&
+      message.element instanceof Element &&
+      document.contains(message.element)
+    );
+
+    for (const message of visibleMessages) {
+      if (sync.cancelled || this.chatId !== sync.chatId) break;
+
+      // Full-history sync keeps its existing video behavior. Date-range sync
+      // additionally persists visible images so they survive virtual-list
+      // recycling, page refreshes, and later exports.
+      if (sync.range) {
+        const existingSlots = new Set((await this.getPersistentMediaForMessage(message)).map(record => record.slot));
+        for (const media of this.getLiveMediaItems(message).filter(item => item.kind === 'image')) {
+          if (sync.cancelled) break;
+          const slot = this.getPersistentMediaSlot(media, media.role, media.index);
+          if (existingSlots.has(slot)) continue;
+          sync.stage = 'capturingMedia';
+          this.updateHistorySyncUI();
+          try {
+            const blob = await this.fetchMediaBlob(media, 15000);
+            const persisted = await this.persistMediaAsset(message, media, blob, media);
+            if (persisted) {
+              existingSlots.add(slot);
+              sync.imageCaptured = (sync.imageCaptured || 0) + 1;
+            }
+          } catch (error) {
+            console.debug('Unable to cache a visible history image:', error);
+          }
+        }
+      }
+
+      if (message.mediaHint === 'video') {
+        const cacheKey = this.getVideoCacheKey(message);
+        const attempts = this.historyVideoCaptureAttempts.get(cacheKey) || 0;
+        if (this.videoBlobCache.has(cacheKey) || attempts >= 2) continue;
+
+        this.historyVideoCaptureAttempts.set(cacheKey, attempts + 1);
+        sync.stage = 'capturingMedia';
+        this.updateHistorySyncUI();
+        try {
+          const captured = await this.captureVideoForMessage(message, message.media || []);
+          if (captured) sync.videoCaptured = (sync.videoCaptured || 0) + 1;
+          else sync.videoUnavailable = (sync.videoUnavailable || 0) + 1;
+        } catch (error) {
+          sync.videoUnavailable = (sync.videoUnavailable || 0) + 1;
+          console.warn('Unable to capture a visible history video:', error);
+        }
+      }
     }
   }
 
-  async loadAllMessages() {
-    const chatContainer = this.getChatContainer();
+  async loadAllMessages({ restorePosition = true, range = null } = {}) {
+    if (this.historySync?.active) return this.historySync.promise;
+
+    const chatContainer = this.getHistoryScrollContainer();
     if (!chatContainer) {
-      console.log('Chat container not found for scrolling');
-      return;
+      throw new Error(t('errorHistoryContainer'));
     }
 
-    let scrollAttempts = 0;
-    const maxScrollAttempts = 50; // Increased max attempts
-    let previousCacheSize = this.messageCache.size;
-    let consecutiveNoChangeAttempts = 0;
-    const maxNoChangeAttempts = 3;
-    
-    console.log('Starting comprehensive message loading...');
-    this.showNotification(t('notifyLoadingHistory'), 'info');
+    const sync = {
+      id: ++this.historySyncSequence,
+      active: true,
+      cancelled: false,
+      cancelReason: '',
+      chatId: this.chatId,
+      count: this.messageCache.size,
+      oldestTimestamp: '',
+      range,
+      imageCaptured: 0,
+      videoCaptured: 0,
+      videoUnavailable: 0,
+      stage: 'starting',
+      promise: null
+    };
+    this.historySync = sync;
+    this.historyVideoCaptureAttempts.clear();
 
-    // Start from current position and work our way up
-    const initialScrollTop = chatContainer.scrollTop;
-    let currentScrollPosition = initialScrollTop;
-    
-    while (scrollAttempts < maxScrollAttempts && consecutiveNoChangeAttempts < maxNoChangeAttempts) {
-      scrollAttempts++;
-      
-      // Calculate how much to scroll up (gradually increase step size)
-      const scrollStep = Math.min(chatContainer.clientHeight * 2, 1000 + (scrollAttempts * 100));
-      currentScrollPosition = Math.max(0, currentScrollPosition - scrollStep);
-      
-      // Scroll to the calculated position
-      chatContainer.scrollTop = currentScrollPosition;
-      console.log(`Scroll attempt ${scrollAttempts}: scrolling to position ${currentScrollPosition}`);
-      
-      // Wait for messages to load with longer delay for thorough loading
-      await this.sleep(1200);
-      
-      // Additional scroll to absolute top to ensure we catch everything
-      if (currentScrollPosition === 0) {
-        chatContainer.scrollTop = 0;
-        await this.sleep(800);
+    sync.promise = this.runHistorySync(sync, chatContainer, { restorePosition });
+    return sync.promise;
+  }
+
+  async runHistorySync(sync, initialContainer, { restorePosition }) {
+    const initialScrollTop = initialContainer.scrollTop;
+    const initialBottomDistance = Math.max(0, initialContainer.scrollHeight - initialContainer.clientHeight - initialScrollTop);
+    const initialAnchor = this.captureHistoryScrollAnchor(initialContainer);
+    let container = initialContainer;
+    let previousSnapshot = this.getVisibleHistorySnapshot(container);
+    let previousCount = this.messageCache.size;
+    let stableTopChecks = 0;
+    let cycle = 0;
+    let lastCheckpointAt = Date.now();
+    let lastPhoneHistoryRequestAt = 0;
+
+    // A range export starts from the newest end of the conversation. This
+    // guarantees coverage even if the user was reading an older point when
+    // export began; the original reading position is restored in finally.
+    if (sync.range) {
+      container.scrollTop = container.scrollHeight;
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await this.sleep(650);
+      const latestContainer = this.getHistoryScrollContainer();
+      if (latestContainer) container = latestContainer;
+      previousSnapshot = this.getVisibleHistorySnapshot(container);
+    }
+
+    this.refreshMessageCache();
+    await this.captureVisibleHistoryMedia(sync);
+    this.updateHistorySyncProgress(sync, previousSnapshot, 'scrolling');
+    console.log(sync.range ? 'Starting date-range history synchronization...' : 'Starting continuous history synchronization...');
+
+    try {
+      let reachedRangeStart = this.hasReachedRangeStart(previousSnapshot, sync.range);
+      while (!sync.cancelled && !reachedRangeStart) {
+        if (this.chatId !== sync.chatId || this.getCurrentChatId() !== sync.chatId) {
+          this.cancelHistorySync('chat-change');
+          break;
+        }
+
+        const latestContainer = this.getHistoryScrollContainer();
+        if (latestContainer) container = latestContainer;
+
+        const beforeTop = container.scrollTop;
+        const nearTopBefore = beforeTop <= Math.max(4, container.clientHeight * 0.01);
+        const scrollStep = Math.max(420, Math.floor(container.clientHeight * 0.78));
+        const targetTop = nearTopBefore ? 0 : Math.max(0, beforeTop - scrollStep);
+        const olderMessagesButton = nearTopBefore ? this.getOlderMessagesButton(container) : null;
+        const canRequestPhoneHistory = olderMessagesButton && Date.now() - lastPhoneHistoryRequestAt >= 12000;
+        const waitMs = canRequestPhoneHistory
+          ? 6500
+          : nearTopBefore
+          ? Math.min(4800, 1900 + (stableTopChecks * 700))
+          : 1600;
+
+        if (canRequestPhoneHistory) {
+          lastPhoneHistoryRequestAt = Date.now();
+          this.updateHistorySyncProgress(sync, previousSnapshot, 'requestingPhone');
+        }
+        const activity = await this.waitForHistoryAction(
+          container,
+          () => canRequestPhoneHistory ? olderMessagesButton.click() : (container.scrollTop = targetTop),
+          waitMs,
+          sync
+        );
+        if (sync.cancelled) break;
+
+        const cacheResult = this.refreshMessageCache();
+        await this.captureVisibleHistoryMedia(sync);
+        const snapshot = this.getVisibleHistorySnapshot(container);
+        const oldestChanged = Boolean(snapshot.oldestKey && snapshot.oldestKey !== previousSnapshot.oldestKey);
+        const cacheGrew = cacheResult.total > previousCount;
+        const nearTopAfter = container.scrollTop <= Math.max(4, container.clientHeight * 0.01);
+        const loading = this.isHistoryLoading(container);
+        const olderHistoryAvailable = Boolean(this.getOlderMessagesButton(container));
+        const stillChanging = activity.mutations > 0 || oldestChanged || cacheGrew;
+
+        if (nearTopAfter && !loading && !olderHistoryAvailable && !stillChanging) {
+          stableTopChecks++;
+        } else {
+          stableTopChecks = 0;
+        }
+
+        previousSnapshot = snapshot;
+        previousCount = cacheResult.total;
+        reachedRangeStart = this.hasReachedRangeStart(snapshot, sync.range);
+        cycle++;
+        this.updateHistorySyncProgress(sync, snapshot,
+          olderHistoryAvailable ? 'waitingPhone' : loading ? 'waiting' : 'scrolling');
+        console.log(`History cycle ${cycle}: ${cacheResult.total} cached, top=${Math.round(container.scrollTop)}, mutations=${activity.mutations}, stable=${stableTopChecks}`);
+
+        // Persist a checkpoint during very long conversations. This also
+        // means stopping, refreshing, or a transient page failure loses at
+        // most a short portion of the traversal rather than the entire run.
+        if (Date.now() - lastCheckpointAt >= 15000) {
+          await this.flushCachedMessages();
+          lastCheckpointAt = Date.now();
+        }
+
+        // A single quiet check is not enough: WhatsApp can pause between its
+        // network response and the virtual-list re-render. Four progressively
+        // longer quiet checks at the real top avoid that false completion.
+        if (reachedRangeStart || stableTopChecks >= 4) break;
       }
-      
-      // Refresh cache with newly visible messages
+
       this.refreshMessageCache();
-      
-      const currentCacheSize = this.messageCache.size;
-      const newMessagesLoaded = currentCacheSize - previousCacheSize;
-      
-      console.log(`Attempt ${scrollAttempts}: ${newMessagesLoaded} new messages, total: ${currentCacheSize}`);
-      
-      if (newMessagesLoaded > 0) {
-        consecutiveNoChangeAttempts = 0; // Reset counter when we find new messages
-        this.showNotification(t('notifyLoadingProgress', [String(currentCacheSize)]), 'info');
-      } else {
-        consecutiveNoChangeAttempts++;
-        console.log(`No new messages found. Consecutive no-change attempts: ${consecutiveNoChangeAttempts}`);
+      await this.flushCachedMessages();
+
+      return {
+        status: sync.cancelled ? 'cancelled' : 'complete',
+        reason: sync.cancelReason,
+        count: this.messageCache.size,
+        imageCaptured: sync.imageCaptured || 0,
+        videoCaptured: sync.videoCaptured || 0,
+        videoUnavailable: sync.videoUnavailable || 0
+      };
+    } finally {
+      if (restorePosition && !['chat-change', 'cache-clear'].includes(sync.cancelReason) && this.chatId === sync.chatId) {
+        await this.restoreHistoryScrollPosition(container, {
+          initialScrollTop,
+          initialBottomDistance,
+          initialAnchor
+        });
+        this.refreshMessageCache();
       }
-      
-      previousCacheSize = currentCacheSize;
-      
-      // If we've reached the top and haven't found new messages for a while, we're done
-      if (currentScrollPosition === 0 && consecutiveNoChangeAttempts >= maxNoChangeAttempts) {
-        console.log('Reached top of conversation and no new messages found');
+
+      sync.active = false;
+      if (this.historySync?.id === sync.id) this.historySync = null;
+      this.updateCacheIndicator();
+      this.updateHistorySyncUI();
+    }
+  }
+
+  cancelHistorySync(reason = 'user') {
+    if (!this.historySync?.active) return false;
+    this.historySync.cancelled = true;
+    this.historySync.cancelReason = reason;
+    this.historySync.stage = 'stopping';
+    this.updateHistorySyncUI();
+    return true;
+  }
+
+  waitForHistoryAction(container, action, maxWaitMs, sync) {
+    return new Promise(resolve => {
+      let mutations = 0;
+      let lastMutationAt = 0;
+      const startedAt = Date.now();
+      let finished = false;
+
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        observer.disconnect();
+        clearInterval(pollTimer);
+        clearTimeout(maxTimer);
+        resolve({ mutations });
+      };
+
+      const observer = new MutationObserver(records => {
+        mutations += records.length;
+        lastMutationAt = Date.now();
+      });
+      observer.observe(container, { childList: true, subtree: true, characterData: true });
+
+      const pollTimer = setInterval(() => {
+        const elapsed = Date.now() - startedAt;
+        if (sync.cancelled || (mutations > 0 && elapsed >= 450 && Date.now() - lastMutationAt >= 400)) {
+          finish();
+        }
+      }, 100);
+      const maxTimer = setTimeout(finish, maxWaitMs);
+
+      action();
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+
+  getHistoryScrollContainer() {
+    const baseSelectors = [
+      '[data-testid="conversation-panel-messages"]',
+      '[data-testid="conversation-panel"] [data-testid="msg-list"]',
+      '[data-testid="conversation-panel"] .copyable-area',
+      '#main .copyable-area',
+      '[data-testid="conversation-panel"]',
+      '#main'
+    ];
+    const candidates = new Set();
+
+    for (const selector of baseSelectors) {
+      const base = document.querySelector(selector);
+      if (!base) continue;
+      candidates.add(base);
+      base.querySelectorAll('div').forEach(node => {
+        if (node.querySelector('.message-in, .message-out, [data-testid="msg-container"], [data-testid^="conv-msg-"]') ||
+            node.matches('[role="application"], [aria-label], [data-testid="conversation-panel-messages"]')) {
+          candidates.add(node);
+        }
+      });
+    }
+
+    const scrollable = Array.from(candidates).filter(node => {
+      const style = getComputedStyle(node);
+      const canScroll = /auto|scroll/.test(style.overflowY) || node.scrollHeight > node.clientHeight + 4;
+      return canScroll && node.clientHeight > 180 &&
+             node.querySelector('.message-in, .message-out, [data-testid="msg-container"], [data-testid^="conv-msg-"]');
+    });
+
+    return scrollable.sort((a, b) => {
+      const aScore = (a.scrollHeight - a.clientHeight) + a.clientHeight * 2;
+      const bScore = (b.scrollHeight - b.clientHeight) + b.clientHeight * 2;
+      return bScore - aScore;
+    })[0] || this.getChatContainer();
+  }
+
+  getVisibleHistorySnapshot(container) {
+    const roots = Array.from(container.querySelectorAll(
+      '.message-in, .message-out, [data-testid="msg-container"], [data-testid^="conv-msg-"]'
+    ));
+    const uniqueRoots = [];
+    const seen = new Set();
+    for (const node of roots) {
+      const root = node.closest('[data-id], [data-message-id], [data-msg-id], [data-testid^="conv-msg-"]') || node;
+      if (seen.has(root)) continue;
+      seen.add(root);
+      uniqueRoots.push(root);
+    }
+
+    const oldest = uniqueRoots[0] || null;
+    const oldestKey = oldest ? this.getHistoryElementKey(oldest) : '';
+    let timestamp = '';
+    for (const root of uniqueRoots) {
+      const preTextNode = root.matches('[data-pre-plain-text]')
+        ? root
+        : root.querySelector('[data-pre-plain-text]');
+      const preTextTimestamp = preTextNode?.getAttribute('data-pre-plain-text')?.match(/\[([^\]]+)\]/)?.[1] || '';
+      const candidate = preTextTimestamp || this.extractTimestamp(root);
+      if (!timestamp) timestamp = candidate;
+      if (this.getDatePart(candidate)) {
+        timestamp = candidate;
         break;
       }
     }
+    return { oldestKey, oldestTimestamp: timestamp, visibleCount: uniqueRoots.length };
+  }
 
-    // Final thorough scan at the very top
-    chatContainer.scrollTop = 0;
-    await this.sleep(1500);
-    this.refreshMessageCache();
-    
-    // Scroll back to bottom
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-    await this.sleep(500);
-    
-    // Final cache refresh at bottom
-    this.refreshMessageCache();
-    
-    const finalCount = this.messageCache.size;
-    console.log(`Finished comprehensive loading. Total messages cached: ${finalCount}`);
-    this.showNotification(t('notifyLoadedMessages', [String(finalCount)]), 'success');
-    
-    // Update the UI to show new cache count
-    this.updateCacheIndicator();
+  getHistoryElementKey(element) {
+    const stableId = this.getStableMessageId(element);
+    if (stableId) return `id:${stableId}`;
+    const preText = element.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || '';
+    const text = this.extractMessageText(element).replace(/\s+/g, ' ').slice(0, 120);
+    return `${preText}|${text}|${this.extractTimestamp(element)}`;
+  }
+
+  isHistoryLoading(container) {
+    const loaders = container.querySelectorAll('[data-testid*="spinner" i], [data-testid*="loader" i], [role="progressbar"], progress');
+    return Array.from(loaders).some(loader => {
+      const rect = loader.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.bottom >= containerRect.top && rect.top <= containerRect.top + containerRect.height * 0.35;
+    });
+  }
+
+  getOlderMessagesButton(container) {
+    const patterns = [
+      /older messages/i,
+      /较早的消息/,
+      /mensajes (?:más )?antiguos/i,
+      /mensagens mais antigas/i,
+      /messages plus anciens/i,
+      /ältere nachrichten/i,
+      /messaggi (?:più vecchi|meno recenti)/i
+    ];
+
+    return Array.from(container.querySelectorAll('button')).find(button => {
+      const label = `${button.innerText || ''} ${button.getAttribute('aria-label') || ''}`.trim();
+      if (!patterns.some(pattern => pattern.test(label))) return false;
+      const rect = button.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.top <= containerRect.top + containerRect.height * 0.35;
+    }) || null;
+  }
+
+  captureHistoryScrollAnchor(container) {
+    const containerTop = container.getBoundingClientRect().top;
+    const candidates = Array.from(container.querySelectorAll('[data-id], [data-message-id], [data-msg-id], [data-testid^="conv-msg-"]'))
+      .filter(node => node.querySelector('.message-in, .message-out, [data-testid="msg-container"]') ||
+                      node.matches('.message-in, .message-out, [data-testid^="conv-msg-"]'))
+      .map(node => ({ node, distance: Math.abs(node.getBoundingClientRect().top - containerTop) }))
+      .sort((a, b) => a.distance - b.distance);
+    const anchor = candidates[0]?.node;
+    return anchor ? {
+      key: this.getStableMessageId(anchor),
+      offset: anchor.getBoundingClientRect().top - containerTop
+    } : null;
+  }
+
+  async restoreHistoryScrollPosition(container, state) {
+    const targetTop = Math.max(0, container.scrollHeight - container.clientHeight - state.initialBottomDistance);
+    container.scrollTop = targetTop;
+    await this.sleep(450);
+
+    if (!state.initialAnchor?.key) return;
+    const escapedId = typeof CSS !== 'undefined' && CSS.escape
+      ? CSS.escape(state.initialAnchor.key)
+      : state.initialAnchor.key.replace(/["\\]/g, '\\$&');
+    const anchor = container.querySelector(`[data-id="${escapedId}"], [data-message-id="${escapedId}"], [data-msg-id="${escapedId}"]`);
+    if (!anchor) return;
+
+    const currentOffset = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += currentOffset - state.initialAnchor.offset;
+  }
+
+  updateHistorySyncProgress(sync, snapshot, stage) {
+    if (!sync) return;
+    sync.count = this.messageCache.size;
+    sync.oldestTimestamp = snapshot?.oldestTimestamp || sync.oldestTimestamp || '';
+    sync.stage = stage;
+    this.updateHistorySyncUI();
+  }
+
+  updateHistorySyncUI() {
+    const button = document.getElementById('load-full-history');
+    const status = document.getElementById('history-sync-status');
+    if (!button || !status) return;
+
+    const sync = this.historySync;
+    if (!sync?.active) {
+      button.textContent = t('menuLoadHistory');
+      button.classList.remove('is-syncing');
+      status.hidden = true;
+      status.textContent = '';
+      return;
+    }
+
+    button.classList.add('is-syncing');
+    button.textContent = sync.stage === 'stopping'
+      ? t('historyStopping')
+      : t('menuStopHistory');
+    status.hidden = false;
+    status.textContent = sync.stage === 'stopping'
+      ? t('historyStoppingDetail')
+      : t(sync.stage === 'requestingPhone'
+          ? 'historySyncRequestingPhone'
+          : sync.stage === 'waitingPhone'
+            ? 'historySyncWaitingPhone'
+            : sync.stage === 'capturingMedia'
+              ? (sync.range ? 'historySyncCapturingMedia' : 'historySyncCapturingVideo')
+            : sync.stage === 'waiting'
+              ? 'historySyncWaiting'
+              : 'historySyncProgress', [
+          String(sync.count),
+          sync.oldestTimestamp || t('historyDateUnknown')
+        ]);
   }
 
   getChatContainer() {
     // Try multiple selectors to find the chat container
     const selectors = [
+      '[data-testid="conversation-panel-messages"]',
       '[data-testid="conversation-panel"] [data-testid="msg-list"]',
       '[data-testid="conversation-panel"] .copyable-area',
       '#main .copyable-area',
@@ -579,7 +1854,7 @@ class WhatsAppAI {
            container.querySelector('[data-testid="msg-container"]')?.closest('.message-out');
   }
 
-  extractMessageText(container) {
+  extractMessageText(container, { excludeQuoted = false } = {}) {
     // Try multiple selectors to get message text
     const textSelectors = [
       '.selectable-text:not([data-testid="msg-meta"])',
@@ -595,8 +1870,10 @@ class WhatsAppAI {
     for (const selector of textSelectors) {
       const elements = container.querySelectorAll(selector);
       elements.forEach(el => {
+        if (excludeQuoted && this.findQuotedMessageContainer(container)?.contains(el)) return;
         const elementText = el.textContent?.trim();
-        if (elementText && !text.includes(elementText) && !this.isTimestamp(elementText)) {
+        if (elementText && !text.includes(elementText) && !this.isTimestamp(elementText) &&
+            !this.isSystemMessage(elementText, el) && !this.isUiChromeText(elementText)) {
           text += elementText + ' ';
         }
       });
@@ -616,28 +1893,45 @@ class WhatsAppAI {
     ];
 
     for (const selector of timeSelectors) {
-      const timeElement = container.querySelector(selector);
-      if (timeElement) {
+      let timestamp = '';
+      for (const timeElement of container.querySelectorAll(selector)) {
         const timeText = timeElement.textContent || 
                         timeElement.getAttribute('aria-label') || 
                         timeElement.getAttribute('title');
-        if (timeText && this.isTimestamp(timeText)) {
-          return timeText;
-        }
+        const candidate = this.normalizeTimestampValue(timeText);
+        // Video bubbles place a "msg-video" icon and the real message time
+        // under the same generated class. Keep scanning to obtain the last
+        // valid clock value rather than stopping at the first icon node.
+        if (candidate) timestamp = candidate;
       }
+      if (timestamp) return timestamp;
     }
 
     // Try to extract from data-pre-plain-text attribute
     const preTextElement = container.querySelector('[data-pre-plain-text]');
     if (preTextElement) {
       const preText = preTextElement.getAttribute('data-pre-plain-text');
-      const timeMatch = preText?.match(/\[(\d{1,2}:\d{2}[^\]]*)\]/);
-      if (timeMatch) {
-        return timeMatch[1];
-      }
+      const timeMatch = preText?.match(/\[([^\]]+)\]/);
+      const timestamp = this.normalizeTimestampValue(timeMatch?.[1]);
+      if (timestamp) return timestamp;
     }
 
-    return new Date().toLocaleTimeString();
+    return '';
+  }
+
+  normalizeTimestampValue(value) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+
+    // Nodes in forwarded/video messages can contain icon labels, the video's
+    // duration and the message time in one string (e.g. "0:0311:31"). The
+    // final clock value is WhatsApp's message timestamp; earlier values are
+    // media durations and must not affect chronological sorting.
+    const times = Array.from(source.matchAll(/\d{1,2}:\d{2}(?::\d{2})?/g));
+    if (times.length === 0) return '';
+    const time = times.at(-1)[0];
+    const date = this.getDatePart(source);
+    return date ? `${time}, ${date}` : time;
   }
 
   extractSender(container, isIncoming) {
@@ -682,23 +1976,47 @@ class WhatsAppAI {
   }
 
   async loadFullHistory() {
+    if (this.historySync?.active) {
+      this.cancelHistorySync('user');
+      this.showNotification(t('notifyHistoryStopping'), 'info');
+      return;
+    }
+
     try {
       this.showNotification(t('notifyLoadingHistory'), 'info');
-      await this.loadAllMessages();
+      const result = await this.loadAllMessages();
 
-      const totalMessages = this.messageCache.size;
-      this.showNotification(t('notifyLoadedHistoryDone', [String(totalMessages)]), 'success');
+      if (result.status === 'complete') {
+        this.showNotification(t('notifyLoadedHistoryDone', [String(result.count)]), 'success');
+        if (result.videoCaptured > 0 || result.videoUnavailable > 0) {
+          this.showNotification(t('notifyHistoryVideoCapture', [
+            String(result.videoCaptured),
+            String(result.videoUnavailable)
+          ]), result.videoUnavailable > 0 ? 'info' : 'success');
+        }
+      } else if (result.reason === 'user') {
+        this.showNotification(t('notifyHistoryStopped', [String(result.count)]), 'info');
+      }
     } catch (error) {
       console.error('Error loading full history:', error);
-      this.showNotification(t('errorLoadHistory'), 'error');
+      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+      this.showNotification(`${t('errorLoadHistory')}${detail}`, 'error');
     }
   }
 
   async clearMessageCache() {
     try {
+      const activeSync = this.historySync?.active ? this.historySync.promise : null;
+      this.cancelHistorySync('cache-clear');
+      if (activeSync) await activeSync;
       this.messageCache.clear();
-      const cacheKey = `whatsapp_messages_${this.chatId}`;
-      await chrome.storage.local.remove([cacheKey]);
+      this.videoBlobCache.clear();
+      this.historyVideoCaptureAttempts.clear();
+      const cacheKey = this.getCacheKey();
+      await Promise.all([
+        chrome.storage.local.remove([cacheKey]),
+        this.clearPersistentMediaForChat(this.chatId)
+      ]);
       this.updateCacheIndicator(); // Update UI
       this.showNotification(t('notifyCacheCleared'), 'success');
     } catch (error) {
@@ -763,27 +2081,928 @@ class WhatsAppAI {
 
   async exportConversation() {
     try {
+      const selection = await this.showExportFormatDialog();
+      if (!selection) return;
+
+      if (selection.range) {
+        const activeSync = this.historySync?.active ? this.historySync.promise : null;
+        if (activeSync) {
+          this.cancelHistorySync('range-export');
+          await activeSync;
+        }
+        this.showNotification(t('notifyLoadingDateRange', [
+          selection.range.startDate,
+          selection.range.endDate
+        ]), 'info');
+        const syncResult = await this.loadAllMessages({ range: selection.range });
+        if (syncResult.status !== 'complete') {
+          if (syncResult.reason === 'user') {
+            this.showNotification(t('notifyRangeExportStopped'), 'info');
+          }
+          return;
+        }
+      }
+
       this.showNotification(t('notifyCollectingMessages'), 'info');
-      
-      const messages = await this.extractMessages(true); // Pass true for full export
-      const formattedConversation = this.formatConversationForAI(messages, true); // Pass true for export format
-      
-      // Create downloadable file
-      const blob = new Blob([formattedConversation], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `whatsapp-conversation-${new Date().toISOString().split('T')[0]}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      
+      // A blank range uses the current cache immediately. A selected range has
+      // already completed its bounded, user-requested traversal above.
+      const cachedMessages = await this.extractMessages(true); // Pass true for full export
+      const messages = this.filterMessagesByDateRange(cachedMessages, selection.range);
+      if (messages.length === 0) {
+        throw new Error(t('errorNoMessagesInRange'));
+      }
+
+      if (selection.format === 'html') {
+        await this.exportHtmlArchive(messages);
+      } else {
+        await this.exportWordDocument(messages);
+      }
+
+      this.clearExportProgress();
       this.showNotification(t('notifyExportSuccess', [String(messages.length)]), 'success');
     } catch (error) {
       console.error('Export error:', error);
-      this.showNotification(t('errorExport'), 'error');
+      this.clearExportProgress();
+      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+      this.showNotification(`${t('errorExport')}${detail}`, 'error');
     }
+  }
+
+  getCachedHistorySummary() {
+    this.refreshMessageCache();
+    const messages = this.sortMessages(this.deduplicateMessages(Array.from(this.messageCache.values())));
+    if (messages.length === 0) {
+      return { count: 0, range: t('exportCacheEmpty') };
+    }
+
+    const first = messages.find(message => this.parseTimestamp(message.timestamp) !== Number.MAX_SAFE_INTEGER);
+    const last = [...messages].reverse().find(message => this.parseTimestamp(message.timestamp) !== Number.MAX_SAFE_INTEGER);
+    const range = first && last
+      ? `${first.timestamp || t('historyDateUnknown')} → ${last.timestamp || t('historyDateUnknown')}`
+      : t('historyDateUnknown');
+    return { count: messages.length, range };
+  }
+
+  showExportFormatDialog() {
+    return new Promise(resolve => {
+      const summary = this.getCachedHistorySummary();
+      const modal = document.createElement('div');
+      modal.className = 'ai-modal';
+      modal.id = 'export-format-modal';
+      modal.innerHTML = `
+        <div class="ai-modal-content">
+          <div class="export-format-header">
+            <div class="export-format-kicker">${t('exportFormatKicker')}</div>
+            <h3>${t('exportFormatTitle')}</h3>
+            <p>${t('exportFormatDesc')}</p>
+            <div class="export-cache-summary">${this.escapeHtml(t('exportCacheSummary', [
+              String(summary.count),
+              summary.range
+            ]))}</div>
+          </div>
+          <div class="export-date-range">
+            <div class="export-date-range-heading">
+              <strong>${t('exportDateRangeTitle')}</strong>
+              <span>${t('exportDateRangeOptional')}</span>
+            </div>
+            <div class="export-date-fields">
+              <label>
+                <span>${t('exportStartDate')}</span>
+                <input id="export-start-date" type="date">
+              </label>
+              <span class="export-date-arrow" aria-hidden="true">→</span>
+              <label>
+                <span>${t('exportEndDate')}</span>
+                <input id="export-end-date" type="date">
+              </label>
+            </div>
+            <p class="export-date-hint">${t('exportDateRangeHint')}</p>
+            <div id="export-date-error" class="export-date-error" hidden></div>
+          </div>
+          <div class="export-format-options">
+            <button id="export-html" class="export-format-option export-format-option-html">
+              <span class="export-format-badge">HTML</span>
+              <span class="export-format-copy">
+                <strong>${t('exportHtmlTitle')}</strong>
+                <small>${t('exportHtmlDetail')}</small>
+              </span>
+              <span class="export-format-arrow" aria-hidden="true">→</span>
+            </button>
+            <button id="export-word" class="export-format-option export-format-option-word">
+              <span class="export-format-badge">DOCX</span>
+              <span class="export-format-copy">
+                <strong>${t('exportWordTitle')}</strong>
+                <small>${t('exportWordDetail')}</small>
+              </span>
+              <span class="export-format-arrow" aria-hidden="true">→</span>
+            </button>
+          </div>
+          <div class="export-format-footer"><button id="cancel-export">${t('btnCancel')}</button></div>
+        </div>
+      `;
+
+      const close = result => {
+        if (document.body.contains(modal)) document.body.removeChild(modal);
+        resolve(result);
+      };
+
+      const chooseFormat = format => {
+        const startDate = modal.querySelector('#export-start-date').value;
+        const endDate = modal.querySelector('#export-end-date').value;
+        const error = modal.querySelector('#export-date-error');
+        error.hidden = true;
+        error.textContent = '';
+
+        if (Boolean(startDate) !== Boolean(endDate)) {
+          error.textContent = t('exportDateRangeRequired');
+          error.hidden = false;
+          return;
+        }
+        const range = this.createExportDateRange(startDate, endDate);
+        if (startDate && !range) {
+          error.textContent = t('exportDateRangeInvalid');
+          error.hidden = false;
+          return;
+        }
+        close({ format, range });
+      };
+
+      modal.querySelector('#export-html').addEventListener('click', () => chooseFormat('html'));
+      modal.querySelector('#export-word').addEventListener('click', () => chooseFormat('docx'));
+      modal.querySelector('#cancel-export').addEventListener('click', () => close(null));
+      modal.addEventListener('click', event => {
+        if (event.target === modal) close(null);
+      });
+
+      document.body.appendChild(modal);
+    });
+  }
+
+  getExportFilePrefix() {
+    const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || 'conversation';
+    const safeTitle = title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || 'conversation';
+    const date = new Date().toISOString().replace(/[:.]/g, '-');
+    return `whatsapp-${safeTitle}-${date}`;
+  }
+
+  downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // Keep large DOCX/ZIP object URLs alive long enough for Chrome's download
+    // service to acquire them. Revoking after one second can cancel a large
+    // local download before it has actually started.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  getMediaForMessage(message) {
+    const cachedMedia = message.media || [];
+    const visibleMedia = message.element instanceof Element
+      ? this.extractMediaFromElement(message.element, { excludeQuoted: true })
+      : [];
+    const seenSources = new Set();
+
+    return [...cachedMedia, ...visibleMedia].filter(media => {
+      if (!media?.src || seenSources.has(media.src)) return false;
+      seenSources.add(media.src);
+      return true;
+    });
+  }
+
+  getQuotedMediaForMessage(message) {
+    const cachedMedia = message.quote?.media || [];
+    const visibleQuote = message.element instanceof Element
+      ? this.extractQuotedMessage(message.element)
+      : null;
+    const visibleMedia = visibleQuote?.media || [];
+    const seenSources = new Set();
+
+    if (visibleQuote && message.quote) {
+      message.quote.sender = visibleQuote.sender || message.quote.sender;
+      message.quote.text = visibleQuote.text || message.quote.text;
+      message.quote.mediaHint = visibleQuote.mediaHint || message.quote.mediaHint;
+      message.quote.media = [...cachedMedia, ...visibleMedia];
+    }
+
+    return [...cachedMedia, ...visibleMedia].filter(media => {
+      if (!media?.src || seenSources.has(media.src)) return false;
+      seenSources.add(media.src);
+      return true;
+    });
+  }
+
+  getMediaExtension(mimeType, kind) {
+    const extensions = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'image/webp': 'webp',
+      'video/mp4': 'mp4',
+      'video/webm': 'webm',
+      'video/ogg': 'ogv'
+    };
+    return extensions[mimeType] || (kind === 'video' ? 'mp4' : 'jpg');
+  }
+
+  isVisibleElement(element) {
+    if (!(element instanceof Element)) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }
+
+  getVideoCacheKey(message) {
+    return `${message?.chatId || this.chatId || 'no-chat'}|${this.createMessageId(message)}`;
+  }
+
+  async retainCapturedVideo(message, captured) {
+    if (!captured?.blob || captured.blob.size < 128) return null;
+    const record = {
+      blob: captured.blob,
+      src: captured.src || '',
+      mimeType: captured.mimeType || captured.blob.type || 'video/mp4'
+    };
+    this.videoBlobCache.set(this.getVideoCacheKey(message), record);
+    await this.persistMediaAsset(message, {
+      kind: 'video',
+      src: record.src,
+      mimeType: record.mimeType
+    }, record.blob, { role: 'attachment', index: 0 });
+    return record;
+  }
+
+  async requestCapturedVideoBlob(contextKey, urls = [], timeoutMs = 800) {
+    window.postMessage({ source: MEDIA_CONTENT_SOURCE, type: 'ping-media-hook' }, location.origin);
+    if (!this.mediaHookReady) await this.sleep(80);
+    if (!this.mediaHookReady) return null;
+
+    const requestId = `video-${Date.now()}-${++this.videoCaptureSequence}`;
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        this.pendingVideoCaptureRequests.delete(requestId);
+        window.postMessage({
+          source: MEDIA_CONTENT_SOURCE,
+          type: 'cancel-video-request',
+          requestId
+        }, location.origin);
+        resolve(null);
+      }, timeoutMs);
+
+      this.pendingVideoCaptureRequests.set(requestId, { resolve, timer });
+      window.postMessage({
+        source: MEDIA_CONTENT_SOURCE,
+        type: 'request-video-blob',
+        requestId,
+        contextKey,
+        urls,
+        timeoutMs
+      }, location.origin);
+    });
+  }
+
+  findMessageActionButton(messageElement, selectors) {
+    for (const selector of selectors) {
+      const match = messageElement.querySelector(selector);
+      const button = match?.closest('button, [role="button"]') || match;
+      if (button && this.isVisibleElement(button)) return button;
+    }
+    return null;
+  }
+
+  async revealMessageActions(messageElement) {
+    try {
+      for (const type of ['mouseenter', 'mouseover', 'pointerover']) {
+        messageElement.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        }));
+      }
+    } catch (error) {
+      console.debug('Unable to reveal WhatsApp message actions:', error);
+    }
+    await this.sleep(180);
+  }
+
+  findDownloadMenuItem(messageElement) {
+    const downloadPattern = /download|下载|descargar|baixar|télécharger|herunterladen|scarica/i;
+    const candidates = Array.from(document.querySelectorAll(
+      '[role="menuitem"], [role="button"], button, [data-testid*="download" i], [data-icon*="download" i]'
+    ));
+
+    return candidates.find(candidate => {
+      if (messageElement.contains(candidate) || !this.isVisibleElement(candidate)) return false;
+      const icon = candidate.matches('[data-icon]')
+        ? candidate.getAttribute('data-icon')
+        : candidate.querySelector('[data-icon]')?.getAttribute('data-icon');
+      const label = [
+        candidate.textContent,
+        candidate.getAttribute('aria-label'),
+        candidate.getAttribute('title'),
+        candidate.getAttribute('data-testid')
+      ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+      return /download/i.test(icon || '') || downloadPattern.test(label);
+    }) || null;
+  }
+
+  async triggerVideoDownload(messageElement) {
+    if (!(messageElement instanceof Element) || !document.contains(messageElement)) return false;
+    const videoContainer = messageElement.querySelector('[data-testid="video-content"]');
+    if (!videoContainer) return false;
+
+    // Some undownloaded videos expose a direct download icon inside the bubble.
+    // This action loads the media without invoking the central play control.
+    const directDownload = this.findMessageActionButton(messageElement, [
+      '[data-testid*="download" i]',
+      '[data-icon="download"]',
+      '[data-icon="ic-download"]'
+    ]);
+    if (directDownload && !directDownload.closest('[data-testid="media-play"]')) {
+      directDownload.click();
+      return true;
+    }
+
+    await this.revealMessageActions(messageElement);
+    const menuButton = this.findMessageActionButton(messageElement, [
+      '[data-testid="down-context"]',
+      '[data-icon="down-context"]',
+      '[data-testid="msg-menu"]',
+      '[data-icon="chevron-down"]'
+    ]);
+    if (!menuButton) return false;
+
+    menuButton.click();
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await this.sleep(100);
+      const downloadItem = this.findDownloadMenuItem(messageElement);
+      if (!downloadItem) continue;
+      downloadItem.click();
+      return true;
+    }
+    return false;
+  }
+
+  async materializeVideoStream(messageElement, contextKey, knownUrls = []) {
+    if (!(messageElement instanceof Element) || !document.contains(messageElement)) return null;
+    const playControl = messageElement.querySelector('[data-testid="media-play"]');
+    if (!playControl) return null;
+
+    const previousSources = new Set(Array.from(document.querySelectorAll('video'))
+      .map(video => video.currentSrc || video.src)
+      .filter(Boolean));
+
+    // Start listening before the click. WhatsApp may create and revoke the
+    // decrypted Blob before the <video> source becomes observable to the
+    // isolated content script.
+    const hookCapture = this.requestCapturedVideoBlob(contextKey, knownUrls, 15000);
+
+    // Target only the central media-play glyph. Clicking video-content itself
+    // can hit the picture-in-picture control or a surrounding navigation area.
+    playControl.click();
+
+    const streamCapture = (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 10000) {
+        await this.sleep(100);
+        const candidates = Array.from(document.querySelectorAll('video'));
+        const video = candidates.find(candidate => {
+          const source = candidate.currentSrc || candidate.src;
+          return source && !previousSources.has(source);
+        }) || (candidates.length === 1 ? candidates[0] : null);
+        const source = video?.currentSrc || video?.src || '';
+        if (!video || !source) continue;
+
+        // WhatsApp starts inline playback as soon as the stream is materialized.
+        // Stop it immediately; the same-origin stream remains fetchable for ZIP.
+        try {
+          video.muted = true;
+          video.pause();
+        } catch (error) {
+          console.debug('Unable to pause the materialized WhatsApp video:', error);
+        }
+
+        try {
+          const blob = await this.fetchMediaBlob({ kind: 'video', src: source }, 20000);
+          return { blob, src: source, mimeType: blob.type || 'video/mp4' };
+        } catch (error) {
+          console.warn('Unable to fetch the materialized WhatsApp video stream:', error);
+          return null;
+        }
+      }
+      return null;
+    })();
+
+    const requireCapture = promise => promise.then(captured => {
+      if (!captured?.blob) throw new Error('Video capture channel returned no Blob');
+      return captured;
+    });
+    try {
+      return await Promise.any([requireCapture(hookCapture), requireCapture(streamCapture)]);
+    } catch (error) {
+      console.warn('WhatsApp video was unavailable through both capture channels:', error);
+      return null;
+    }
+  }
+
+  async captureVideoForMessage(message, knownMedia = []) {
+    const cachedVideo = this.videoBlobCache.get(this.getVideoCacheKey(message));
+    if (cachedVideo) return cachedVideo;
+
+    const persistentVideo = (await this.getPersistentMediaForMessage(message))
+      .find(record => record.kind === 'video' && record.role === 'attachment');
+    if (persistentVideo?.blob) {
+      const restored = {
+        blob: persistentVideo.blob,
+        src: persistentVideo.source || '',
+        mimeType: persistentVideo.mimeType || persistentVideo.blob.type || 'video/mp4'
+      };
+      this.videoBlobCache.set(this.getVideoCacheKey(message), restored);
+      return restored;
+    }
+
+    const contextKey = this.getVideoCacheKey(message);
+    const knownUrls = knownMedia.filter(media => media.kind === 'video' && media.src).map(media => media.src);
+    for (const media of knownMedia.filter(item => item.kind === 'video' && item.src)) {
+      try {
+        const blob = await this.fetchMediaBlob(media, 8000);
+        if (blob) return this.retainCapturedVideo(message, { blob, src: media.src, mimeType: blob.type });
+      } catch (error) {
+        console.debug('Visible WhatsApp video source was not directly fetchable:', error);
+      }
+    }
+
+    // Reuse a video retained earlier in this page session before interacting
+    // with WhatsApp's message menu.
+    const retained = await this.requestCapturedVideoBlob(contextKey, knownUrls, 400);
+    if (retained) return this.retainCapturedVideo(message, retained);
+
+    const messageElement = message.element;
+    if (!(messageElement instanceof Element) || !document.contains(messageElement) ||
+        !messageElement.querySelector('[data-testid="video-content"]')) {
+      return null;
+    }
+
+    window.postMessage({
+      source: MEDIA_CONTENT_SOURCE,
+      type: 'begin-video-capture',
+      contextKey
+    }, location.origin);
+
+    try {
+      const triggered = await this.triggerVideoDownload(messageElement);
+      let captured = triggered
+        ? await this.requestCapturedVideoBlob(contextKey, knownUrls, 8000)
+        : null;
+      if (!captured) captured = await this.materializeVideoStream(messageElement, contextKey, knownUrls);
+      // A slow object-URL creation can land just after the materialization
+      // watcher finishes. Make one short final bridge lookup before declaring
+      // the historical video unavailable.
+      if (!captured) captured = await this.requestCapturedVideoBlob(contextKey, knownUrls, 1500);
+      return this.retainCapturedVideo(message, captured);
+    } finally {
+      window.postMessage({
+        source: MEDIA_CONTENT_SOURCE,
+        type: 'end-video-capture',
+        contextKey
+      }, location.origin);
+    }
+  }
+
+  async getExportMediaItems(message) {
+    const persistent = (await this.getPersistentMediaForMessage(message)).map(record => ({
+      kind: record.kind,
+      src: record.source || `persistent:${record.key}`,
+      blob: record.blob,
+      mimeType: record.mimeType,
+      role: record.role || 'attachment',
+      index: Number.isInteger(record.index) ? record.index : 0,
+      isVideoPoster: Boolean(record.isVideoPoster),
+      persistentKey: record.key
+    }));
+    const persistentSlots = new Set(persistent.map(media =>
+      this.getPersistentMediaSlot(media, media.role, media.index)
+    ));
+    const live = this.getLiveMediaItems(message).filter(media =>
+      !persistentSlots.has(this.getPersistentMediaSlot(media, media.role, media.index))
+    );
+    return [...persistent, ...live];
+  }
+
+  async collectMediaAssets(messages, includeVideos) {
+    const assets = [];
+    const mediaByMessage = new Map();
+    let assetIndex = 0;
+    let videoIndex = 0;
+    let unavailableVideos = 0;
+    const videoMessages = includeVideos
+      ? messages.filter(message => message.mediaHint === 'video')
+      : [];
+
+    for (const message of messages) {
+      const fetchedAssets = [];
+      const mediaItems = await this.getExportMediaItems(message);
+
+      if (includeVideos && message.mediaHint === 'video' && !mediaItems.some(media => media.kind === 'video')) {
+        videoIndex++;
+        this.showExportProgress(t('htmlVideoProgress', [String(videoIndex), String(videoMessages.length)]));
+        const captured = await this.captureVideoForMessage(message, mediaItems);
+        if (captured?.blob) {
+          mediaItems.unshift({
+            kind: 'video',
+            src: captured.src || `captured:${this.createMessageId(message)}`,
+            blob: captured.blob,
+            mimeType: captured.mimeType,
+            role: 'attachment',
+            index: 0
+          });
+        }
+      }
+
+      for (const media of mediaItems) {
+        if (media.kind !== 'image' && (media.kind !== 'video' || !includeVideos)) continue;
+
+        try {
+          const blob = await this.fetchMediaBlob(media, media.kind === 'video' ? 20000 : 15000);
+          // WhatsApp inserts a transparent 42-byte GIF while lazy media is
+          // loading. It is not an attachment and must not be archived.
+          if (blob.size < 128) continue;
+
+          const mimeType = media.mimeType || blob.type || (media.kind === 'video' ? 'video/mp4' : 'image/jpeg');
+          if (!media.persistentKey) {
+            await this.persistMediaAsset(message, { ...media, mimeType }, blob, media);
+          }
+          fetchedAssets.push({
+            blob,
+            kind: media.kind,
+            mimeType,
+            source: media.src,
+            role: media.role,
+            isVideoPoster: Boolean(media.isVideoPoster)
+          });
+        } catch (error) {
+          console.warn('Unable to export media attachment:', error);
+        }
+      }
+
+      if (includeVideos && message.mediaHint === 'video' &&
+          !fetchedAssets.some(asset => asset.kind === 'video' && asset.role === 'attachment')) {
+        unavailableVideos++;
+      }
+
+      // A message bubble can contain both WhatsApp's tiny preview and the
+      // original image. Keep the original, while preserving genuine albums.
+      const largestImageSizeByRole = new Map();
+      fetchedAssets.filter(asset => asset.kind === 'image').forEach(asset => {
+        largestImageSizeByRole.set(asset.role, Math.max(largestImageSizeByRole.get(asset.role) || 0, asset.blob.size));
+      });
+      const messageAssets = fetchedAssets.filter(asset => {
+        const largestImageSize = largestImageSizeByRole.get(asset.role) || 0;
+        if (asset.kind !== 'image' || largestImageSize < 16 * 1024) return true;
+        return asset.blob.size >= Math.max(4 * 1024, largestImageSize * 0.15);
+      }).map(asset => ({
+        ...asset,
+        filename: `${String(++assetIndex).padStart(4, '0')}-${asset.isVideoPoster ? 'video-poster' : asset.kind}.${this.getMediaExtension(asset.mimeType, asset.kind)}`
+      }));
+
+      assets.push(...messageAssets);
+      mediaByMessage.set(this.createMessageId(message), messageAssets);
+    }
+
+    return { assets, mediaByMessage, unavailableVideos };
+  }
+
+  escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, character => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      "'": '&#39;',
+      '"': '&quot;'
+    })[character]);
+  }
+
+  createConversationHtml(messages, mediaByMessage) {
+    const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || 'WhatsApp Conversation';
+    const messageHtml = messages.map(message => {
+      const assets = mediaByMessage.get(this.createMessageId(message)) || [];
+      const getAssetSource = asset => `media/${encodeURIComponent(asset.filename)}`;
+      const renderMediaGroup = (role, videoExpected) => {
+        const group = assets.filter(asset => asset.role === role);
+        const videos = group.filter(asset => asset.kind === 'video');
+        const posters = group.filter(asset => asset.kind === 'image' && asset.isVideoPoster)
+          .sort((a, b) => b.blob.size - a.blob.size);
+        const images = group.filter(asset => asset.kind === 'image' && !asset.isVideoPoster);
+        const poster = posters[0];
+
+        const videoHtml = videos.map(asset => {
+          const posterAttribute = poster ? ` poster="${getAssetSource(poster)}"` : '';
+          return `<video controls preload="metadata"${posterAttribute} src="${getAssetSource(asset)}"></video>`;
+        }).join('');
+        const imageHtml = images.map(asset =>
+          `<img src="${getAssetSource(asset)}" alt="${this.escapeHtml(t('exportImageAlt'))}">`
+        ).join('');
+
+        if (videoHtml) return `${videoHtml}${imageHtml}`;
+        if (videoExpected && poster) {
+          return `<figure class="video-unavailable"><img src="${getAssetSource(poster)}" alt="${this.escapeHtml(t('exportVideoPosterAlt'))}"><figcaption>${this.escapeHtml(t('exportVideoUnavailable'))}</figcaption></figure>${imageHtml}`;
+        }
+        if (videoExpected && !imageHtml) {
+          return `<div class="media-warning">${this.escapeHtml(t('exportVideoUnavailable'))}</div>`;
+        }
+        return `${posters.map(asset => `<img src="${getAssetSource(asset)}" alt="${this.escapeHtml(t('exportImageAlt'))}">`).join('')}${imageHtml}`;
+      };
+      const mediaHtml = renderMediaGroup('attachment', message.mediaHint === 'video');
+      const quoteAssetsHtml = renderMediaGroup('quoted', message.quote?.mediaHint === 'video');
+      const quoteHtml = message.quote ? `<aside class="quoted-message">
+        <div class="quoted-label">↩ ${this.escapeHtml(message.quote.sender || t('exportQuotedMessage'))}</div>
+        ${message.quote.text ? `<div class="quoted-text">${this.escapeHtml(message.quote.text).replace(/\n/g, '<br>')}</div>` : ''}
+        ${quoteAssetsHtml ? `<div class="quoted-media">${quoteAssetsHtml}</div>` : (message.quote.mediaHint ? `<div class="quoted-text">${this.escapeHtml(t('exportMediaAttachment'))}</div>` : '')}
+      </aside>` : '';
+
+      return `<article class="message ${message.type === 'outgoing' ? 'outgoing' : 'incoming'}">
+        <div class="meta">${this.escapeHtml(message.sender)} · ${this.escapeHtml(message.timestamp)}</div>
+        ${quoteHtml}
+        <div class="text">${this.escapeHtml(message.text).replace(/\n/g, '<br>')}</div>
+        <div class="media">${mediaHtml}</div>
+      </article>`;
+    }).join('\n');
+
+    return `<!doctype html>
+<html lang="${document.documentElement.lang || 'en'}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${this.escapeHtml(title)}</title>
+  <style>
+    body { background:#e5ddd5; color:#111; font:14px/1.45 Arial,sans-serif; margin:0; }
+    main { max-width:900px; margin:0 auto; padding:24px; }
+    header { background:#fff; border-radius:8px; margin-bottom:16px; padding:18px; }
+    .message { background:#fff; border-radius:8px; margin:8px 0; max-width:78%; padding:10px 12px; word-break:break-word; }
+    .outgoing { background:#d9fdd3; margin-left:auto; } .incoming { margin-right:auto; }
+    .meta { color:#667781; font-size:12px; margin-bottom:5px; } .media { display:grid; gap:8px; margin-top:8px; }
+    .quoted-message { border-left:4px solid #00a884; background:rgba(0,0,0,.045); border-radius:4px; margin:0 0 8px; padding:7px 9px; }
+    .quoted-label { color:#008069; font-size:12px; font-weight:700; } .quoted-text { color:#3b4a54; font-size:13px; margin-top:3px; }
+    .quoted-media { display:flex; gap:6px; margin-top:6px; } .quoted-media img, .quoted-media video { max-height:100px; max-width:180px; }
+    img, video { border-radius:6px; max-height:480px; max-width:100%; } video { background:#000; }
+    .video-unavailable { margin:0; position:relative; } .video-unavailable figcaption, .media-warning { background:#fff3cd; border-radius:4px; color:#664d03; font-size:12px; margin-top:5px; padding:6px 8px; }
+    @media print { body { background:#fff; } main { max-width:none; padding:0; } .message { break-inside:avoid; } }
+  </style>
+</head>
+<body><main><header><h1>${this.escapeHtml(title)}</h1><div>${this.escapeHtml(t('exportGeneratedOn'))}: ${this.escapeHtml(new Date().toLocaleString())}</div></header>${messageHtml}</main></body>
+</html>`;
+  }
+
+  async exportHtmlArchive(messages) {
+    this.showNotification(t('notifyPreparingMedia'), 'info');
+    const { assets, mediaByMessage, unavailableVideos } = await this.collectMediaAssets(messages, true);
+    const zip = new JSZip();
+
+    zip.file('index.html', this.createConversationHtml(messages, mediaByMessage));
+    assets.forEach(asset => zip.file(`media/${asset.filename}`, asset.blob));
+
+    const archive = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    this.downloadBlob(archive, `${this.getExportFilePrefix()}.zip`);
+    if (unavailableVideos > 0) {
+      this.showNotification(t('htmlVideoUnavailableSummary', [String(unavailableVideos)]), 'info');
+    }
+  }
+
+  sanitizeWordText(value) {
+    // XML 1.0 rejects these control characters. One invisible character in a
+    // WhatsApp message must not invalidate the entire DOCX package.
+    return String(value || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '');
+  }
+
+  async getWordImageCandidates(message) {
+    const items = (await this.getExportMediaItems(message))
+      .filter(media => media.kind === 'image' && (media.src || media.blob instanceof Blob));
+    const seenSources = new Set();
+    return items.filter(media => {
+      if (seenSources.has(media.src)) return false;
+      seenSources.add(media.src);
+      return true;
+    });
+  }
+
+  async fetchMediaBlob(media, timeoutMs = 15000) {
+    if (media.blob instanceof Blob) return media.blob;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const streamVideo = media.kind === 'video' && /\/stream\/video(?:[/?]|$)/i.test(media.src || '');
+      const response = await fetch(media.src, {
+        signal: controller.signal,
+        headers: streamVideo ? { Range: 'bytes=0-' } : undefined,
+        credentials: streamVideo ? 'include' : 'same-origin'
+      });
+      if (!response.ok) throw new Error(`Media request failed with ${response.status}`);
+      const blob = await response.blob();
+      if (blob.size < 128) throw new Error('Media response was an empty placeholder');
+      return blob;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async mapWithConcurrency(items, concurrency, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        try {
+          results[index] = await mapper(items[index], index);
+        } catch (error) {
+          results[index] = { error };
+        }
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
+  async fetchBestWordImages(mediaItems) {
+    const fetched = await this.mapWithConcurrency(mediaItems, 3, async media => ({
+      media,
+      blob: await this.fetchMediaBlob(media)
+    }));
+    const valid = fetched.filter(result => result?.blob instanceof Blob);
+    fetched.filter(result => result?.error).forEach(result => {
+      console.warn('Unable to fetch image for Word export:', result.error);
+    });
+
+    // WhatsApp exposes a tiny preview and a full image for the same attachment.
+    // Compare within each role so a quoted thumbnail never removes the message's
+    // own attachment (or vice versa).
+    const largestByRole = new Map();
+    valid.forEach(result => {
+      const role = result.media.role || 'attachment';
+      largestByRole.set(role, Math.max(largestByRole.get(role) || 0, result.blob.size));
+    });
+    return valid.filter(result => {
+      const largest = largestByRole.get(result.media.role || 'attachment') || 0;
+      if (largest < 16 * 1024) return true;
+      return result.blob.size >= Math.max(4 * 1024, largest * 0.15);
+    });
+  }
+
+  async prepareWordImage(blob) {
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const element = new Image();
+        element.onload = () => resolve(element);
+        element.onerror = () => reject(new Error('The image could not be decoded'));
+        element.src = url;
+      });
+      const sourceWidth = Math.max(1, image.naturalWidth);
+      const sourceHeight = Math.max(1, image.naturalHeight);
+      const sourceType = this.getMediaExtension(blob.type, 'image');
+      const supported = ['jpg', 'png', 'gif', 'bmp'].includes(sourceType);
+      const mustOptimize = !supported || blob.size > 350 * 1024 ||
+                           sourceWidth > 1600 || sourceHeight > 1600;
+      let outputBlob = blob;
+      let outputType = sourceType;
+      let outputWidth = sourceWidth;
+      let outputHeight = sourceHeight;
+
+      if (mustOptimize) {
+        const scale = Math.min(1, WORD_IMAGE_MAX_DIMENSION / sourceWidth, WORD_IMAGE_MAX_DIMENSION / sourceHeight);
+        outputWidth = Math.max(1, Math.round(sourceWidth * scale));
+        outputHeight = Math.max(1, Math.round(sourceHeight * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = outputWidth;
+        canvas.height = outputHeight;
+        const context = canvas.getContext('2d', { alpha: false });
+        if (!context) throw new Error('Image canvas is unavailable');
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, outputWidth, outputHeight);
+        context.drawImage(image, 0, 0, outputWidth, outputHeight);
+        outputBlob = await new Promise((resolve, reject) => {
+          canvas.toBlob(result => result ? resolve(result) : reject(new Error('Image compression failed')), 'image/jpeg', 0.72);
+        });
+        outputType = 'jpg';
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+
+      const displayScale = Math.min(1, 520 / outputWidth, 520 / outputHeight);
+      return {
+        blob: outputBlob,
+        type: outputType,
+        transformation: {
+          width: Math.max(1, Math.round(outputWidth * displayScale)),
+          height: Math.max(1, Math.round(outputHeight * displayScale))
+        }
+      };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async createWordImageRun(asset) {
+    const prepared = await this.prepareWordImage(asset.blob);
+    return {
+      run: new ImageRun({
+        data: await prepared.blob.arrayBuffer(),
+        type: prepared.type,
+        transformation: prepared.transformation
+      }),
+      bytes: prepared.blob.size
+    };
+  }
+
+  async exportWordDocument(messages) {
+    this.showExportProgress(t('wordExportPreparing'));
+    const title = document.querySelector('[data-testid="conversation-info-header-chat-title"]')?.textContent?.trim() || 'WhatsApp Conversation';
+    const children = [
+      new Paragraph({ text: this.sanitizeWordText(title), heading: HeadingLevel.HEADING_1 }),
+      new Paragraph({ text: `${t('exportGeneratedOn')}: ${new Date().toLocaleString()}` })
+    ];
+    const candidatesByMessage = await Promise.all(messages.map(async message => ({
+      message,
+      media: await this.getWordImageCandidates(message)
+    })));
+    const totalImages = candidatesByMessage.reduce((total, entry) => total + entry.media.length, 0);
+    let processedImages = 0;
+    let embeddedImages = 0;
+    let skippedImages = 0;
+    let embeddedBytes = 0;
+
+    for (const { message, media } of candidatesByMessage) {
+      children.push(new Paragraph({
+        children: [new TextRun({
+          text: this.sanitizeWordText(`[${message.timestamp}] ${message.sender}: ${message.text}`)
+        })],
+        spacing: { before: 160 }
+      }));
+
+      const bestImages = await this.fetchBestWordImages(media);
+      await Promise.all(bestImages.map(asset => asset.media.persistentKey
+        ? Promise.resolve()
+        : this.persistMediaAsset(message, asset.media, asset.blob, asset.media)));
+      let quotedLabelAdded = false;
+      for (const asset of bestImages) {
+        processedImages++;
+        this.showExportProgress(t('wordExportImageProgress', [
+          String(Math.min(processedImages, totalImages)),
+          String(totalImages)
+        ]));
+        try {
+          const prepared = await this.createWordImageRun(asset);
+          if (embeddedBytes + prepared.bytes > WORD_MEDIA_BUDGET_BYTES) {
+            skippedImages++;
+            continue;
+          }
+
+          if (asset.media.role === 'quoted' && !quotedLabelAdded) {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `↩ ${t('exportQuotedMessage')}`, italics: true })],
+              spacing: { before: 80 }
+            }));
+            quotedLabelAdded = true;
+          }
+          children.push(new Paragraph({ children: [prepared.run] }));
+          embeddedBytes += prepared.bytes;
+          embeddedImages++;
+        } catch (error) {
+          skippedImages++;
+          console.warn('Unable to embed image in Word export:', error);
+        }
+        // Yield between images so WhatsApp remains responsive and progress can
+        // repaint even for large conversations.
+        await this.sleep(0);
+      }
+      processedImages += Math.max(0, media.length - bestImages.length);
+    }
+
+    if (skippedImages > 0) {
+      children.push(new Paragraph({
+        children: [new TextRun({
+          text: t('wordExportSkippedImages', [String(skippedImages)]),
+          italics: true,
+          color: '777777'
+        })],
+        spacing: { before: 200 }
+      }));
+    }
+
+    this.showExportProgress(t('wordExportBuilding', [String(embeddedImages)]));
+    await this.sleep(50);
+    const wordDocument = new Document({ sections: [{ children }] });
+    // toBlob is docx's browser-native path and avoids holding both a large
+    // ArrayBuffer and a second Blob copy at the peak of the export.
+    const file = await Packer.toBlob(wordDocument);
+    if (!(file instanceof Blob) || file.size === 0) {
+      throw new Error(t('wordExportEmptyError'));
+    }
+    this.downloadBlob(file, `${this.getExportFilePrefix()}.docx`);
   }
 
   showInstructionsDialog() {
@@ -897,8 +3116,6 @@ class WhatsAppAI {
       this.showNotification(t('notifyGenerating'), 'info');
 
       const conversationText = this.formatConversationForAI(messages, messageInstructions);
-      console.log('Conversation to analyze:', conversationText);
-
       const response = await this.callAI(conversationText, images);
 
       if (response) {
@@ -1023,8 +3240,6 @@ Your response:`;
       }
 
       const data = await response.json();
-      console.log('DeepSeek API Response:', data);
-
       const generatedText = data.choices?.[0]?.message?.content;
 
       if (!generatedText || generatedText.trim() === '') {
@@ -1051,11 +3266,11 @@ Your response:`;
     ];
 
     try {
-      // Updated API endpoint - using the correct v1 endpoint
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${this.apiKey}`, {
+      const response = await fetch(GEMINI_GENERATE_ENDPOINT, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey
         },
         body: JSON.stringify({
           contents: [{
@@ -1095,8 +3310,6 @@ Your response:`;
       }
 
       const data = await response.json();
-      console.log('Gemini API Response:', data);
-      
       // Check if response was truncated due to max tokens
       const finishReason = data.candidates?.[0]?.finishReason;
       if (finishReason === 'MAX_TOKENS') {
@@ -1106,9 +3319,17 @@ Your response:`;
       // Try different possible response structures
       let generatedText = null;
       
+      // Gemini 3.5 may return reasoning parts before its visible answer. Only
+      // show non-thought text to the user, while retaining compatibility with
+      // the older single-part response structure.
+      const responseParts = data.candidates?.[0]?.content?.parts || [];
+      const visibleTextParts = responseParts.filter(part => part.text && !part.thought);
+      if (visibleTextParts.length > 0) {
+        generatedText = visibleTextParts.map(part => part.text).join('\n');
+      }
       // Standard Gemini response structure
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        generatedText = data.candidates[0].content.parts[0].text;
+      else if (responseParts[0]?.text) {
+        generatedText = responseParts[0].text;
       }
       // Alternative structure - sometimes content is directly text
       else if (data.candidates?.[0]?.content && typeof data.candidates[0].content === 'string') {
@@ -1248,7 +3469,7 @@ Your response:`;
 
           <div class="setting-group" id="gemini-settings-group">
             <label for="gemini-api-key">${t('labelApiKey')}</label>
-            <input type="password" id="gemini-api-key" placeholder="${t('placeholderApiKey')}" value="${this.apiKey}">
+            <input type="password" id="gemini-api-key" placeholder="${t('placeholderApiKey')}">
             <small>
               ${t('apiKeyStep1')}<br>
               ${t('apiKeyStep2')}<br>
@@ -1259,7 +3480,7 @@ Your response:`;
 
           <div class="setting-group" id="deepseek-settings-group">
             <label for="deepseek-api-key">${t('labelDeepSeekApiKey')}</label>
-            <input type="password" id="deepseek-api-key" placeholder="${t('placeholderDeepSeekApiKey')}" value="${this.deepseekApiKey}">
+            <input type="password" id="deepseek-api-key" placeholder="${t('placeholderDeepSeekApiKey')}">
             <small>
               ${t('deepSeekApiKeyStep1')}<br>
               ${t('deepSeekApiKeyStep2')}<br>
@@ -1275,7 +3496,7 @@ Your response:`;
 
           <div class="setting-group">
             <label for="system-instructions">${t('labelSystemInstructions')}</label>
-            <textarea id="system-instructions" placeholder="${t('placeholderSystemInstructions')}" rows="6">${this.systemInstructions}</textarea>
+            <textarea id="system-instructions" placeholder="${t('placeholderSystemInstructions')}" rows="6"></textarea>
             <small>
               <strong>${t('systemInstructionsHelpTitle')}</strong> ${t('systemInstructionsHelpDesc')}<br>
               <strong>${t('examplesTitle')}</strong><br>
@@ -1316,9 +3537,15 @@ Your response:`;
     // Set the provider/model dropdowns to the currently saved values and
     // show only the API key group that matches the selected provider
     const providerSelect = modal.querySelector('#ai-provider');
+    const geminiApiKeyInput = modal.querySelector('#gemini-api-key');
+    const deepSeekApiKeyInput = modal.querySelector('#deepseek-api-key');
+    const systemInstructionsInput = modal.querySelector('#system-instructions');
     const geminiGroup = modal.querySelector('#gemini-settings-group');
     const deepseekGroup = modal.querySelector('#deepseek-settings-group');
     providerSelect.value = this.aiProvider;
+    geminiApiKeyInput.value = this.apiKey;
+    deepSeekApiKeyInput.value = this.deepseekApiKey;
+    systemInstructionsInput.value = this.systemInstructions;
     modal.querySelector('#deepseek-model').value = this.deepseekModel;
 
     const toggleProviderGroups = () => {
@@ -1388,9 +3615,12 @@ Your response:`;
                 max_tokens: 20
               })
             })
-          : await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+          : await fetch(GEMINI_GENERATE_ENDPOINT, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey
+              },
               body: JSON.stringify({
                 contents: [{ parts: [{ text: 'Hello, this is a test.' }] }]
               })
@@ -1428,17 +3658,45 @@ Your response:`;
       this.aiProvider = providerSelect.value;
       this.systemInstructions = systemInstructions || t('defaultSystemInstructions');
 
-      await chrome.storage.sync.set({
-        geminiApiKey: apiKey,
-        deepseekApiKey: deepseekApiKey,
-        deepseekModel: deepseekModel,
-        aiProvider: this.aiProvider,
-        systemInstructions: this.systemInstructions
-      });
+      try {
+        await chrome.storage.local.set({
+          geminiApiKey: apiKey,
+          deepseekApiKey: deepseekApiKey
+        });
+        await chrome.storage.sync.set({
+          deepseekModel: deepseekModel,
+          aiProvider: this.aiProvider,
+          systemInstructions: this.systemInstructions
+        });
+      } catch (error) {
+        console.error('Unable to save settings:', error);
+        this.showNotification(t('errorSettingsSaveFailed'), 'error');
+        return;
+      }
 
       this.showNotification(t('notifySettingsSaved'), 'success');
       document.body.removeChild(modal);
     });
+  }
+
+  showExportProgress(message) {
+    let notification = this.exportProgressNotification;
+    if (!notification || !document.body.contains(notification)) {
+      notification = document.createElement('div');
+      notification.className = 'ai-notification ai-notification-info ai-export-progress';
+      document.body.appendChild(notification);
+      this.exportProgressNotification = notification;
+      requestAnimationFrame(() => notification.classList.add('show'));
+    }
+    notification.textContent = message;
+  }
+
+  clearExportProgress() {
+    const notification = this.exportProgressNotification;
+    this.exportProgressNotification = null;
+    if (!notification) return;
+    notification.classList.remove('show');
+    setTimeout(() => notification.remove(), 300);
   }
 
   showNotification(message, type = 'info') {

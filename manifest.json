@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "1.3",
+  "version": "1.6.0",
   "description": "__MSG_extDescription__",
   "default_locale": "en",
   "permissions": [
     "activeTab",
-    "storage",
-    "scripting"
+    "storage"
   ],
   "host_permissions": [
     "https://web.whatsapp.com/*",
@@ -17,7 +16,13 @@
   "content_scripts": [
     {
       "matches": ["https://web.whatsapp.com/*"],
-      "js": ["content.js"],
+      "js": ["media-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["dist/content.js"],
       "css": ["styles.css"],
       "run_at": "document_end"
     }
@@ -25,8 +30,5 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "__MSG_actionTitle__"
-  },
-  "background": {
-    "service_worker": "background.js"
   }
 }
