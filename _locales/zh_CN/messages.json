@@ -76,14 +76,6 @@
     "message": "同步已停止，已保留 $COUNT$ 条缓存消息。",
     "placeholders": { "count": { "content": "$1" } }
   },
-  "notifyLoadingProgress": {
-    "message": "加载中...已找到 $COUNT$ 条消息",
-    "placeholders": { "count": { "content": "$1" } }
-  },
-  "notifyLoadedMessages": {
-    "message": "已加载 $COUNT$ 条对话消息",
-    "placeholders": { "count": { "content": "$1" } }
-  },
   "notifyLoadedHistoryDone": {
     "message": "已加载 $COUNT$ 条消息，缓存已更新为完整对话历史。",
     "placeholders": { "count": { "content": "$1" } }
@@ -153,8 +145,6 @@
   "exportHtmlDetail": { "message": "包含图片和视频，可离线在浏览器中打开" },
   "exportWordTitle": { "message": "Word 文档" },
   "exportWordDetail": { "message": "仅包含图片，适合编辑和打印" },
-  "btnExportHtml": { "message": "HTML 归档（图片 + 视频）" },
-  "btnExportWord": { "message": "Word 文档（仅图片）" },
   "btnCancel": { "message": "取消" },
   "notifyPreparingMedia": { "message": "正在准备导出的媒体文件..." },
   "htmlVideoProgress": {

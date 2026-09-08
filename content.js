@@ -44,7 +44,6 @@ const WORD_IMAGE_MAX_DIMENSION = 1280;
 
 class WhatsAppAI {
   constructor() {
-    this.messages = [];
     this.apiKey = '';
     this.systemInstructions = '';
     this.aiProvider = 'gemini';
@@ -2020,21 +2019,7 @@ class WhatsAppAI {
     }
   }
 
-  formatConversationForAI(messages, instructionsOrIsExport = false, messageInstructions = '') {
-    // Handle both old and new parameter patterns
-    let isExport = false;
-    let instructions = '';
-    
-    if (typeof instructionsOrIsExport === 'boolean') {
-      // Old usage: formatConversationForAI(messages, isExport)
-      isExport = instructionsOrIsExport;
-      instructions = messageInstructions;
-    } else {
-      // New usage: formatConversationForAI(messages, messageInstructions)
-      instructions = instructionsOrIsExport || '';
-      isExport = false;
-    }
-
+  formatConversationForAI(messages, instructions = '') {
     const messageCount = messages.length;
     let conversation = `WhatsApp Conversation Export (${messageCount} messages):\n`;
     conversation += `Generated on: ${new Date().toLocaleString()}\n\n`;
@@ -2049,26 +2034,16 @@ class WhatsAppAI {
     const lastMessage = messages[messageCount - 1];
     conversation += `Conversation timeframe: ${firstMessage.timestamp} to ${lastMessage.timestamp}\n`;
     
-    if (isExport) {
-      conversation += `All messages (${messageCount} total):\n\n`;
-      // For export, include ALL messages
-      messages.forEach(msg => {
-        conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}\n`;
-      });
-    } else {
-      conversation += `Recent messages (showing ${Math.min(100, messageCount)} most recent):\n\n`;
-      // For AI, show most recent messages
-      const messagesToShow = messages.slice(-100);
-      messagesToShow.forEach(msg => {
-        conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}\n`;
-      });
-      
-      // Add specific instructions for next message if provided
-      if (instructions && instructions.trim() !== '') {
-        conversation += `\n--- Instructions for next message ---\n`;
-        conversation += `${instructions.trim()}\n`;
-        conversation += `--- End instructions ---\n`;
-      }
+    conversation += `Recent messages (showing ${Math.min(100, messageCount)} most recent):\n\n`;
+    const messagesToShow = messages.slice(-100);
+    messagesToShow.forEach(msg => {
+      conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}\n`;
+    });
+
+    if (instructions && instructions.trim() !== '') {
+      conversation += `\n--- Instructions for next message ---\n`;
+      conversation += `${instructions.trim()}\n`;
+      conversation += `--- End instructions ---\n`;
     }
     
     return conversation;

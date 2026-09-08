@@ -147,14 +147,6 @@
     return url;
   };
 
-  // Keep the Blob reference even after WhatsApp revokes its short-lived URL.
-  // The original revoke still runs, so the page's normal resource lifecycle is
-  // unchanged and the retained copy is evicted by the limits above.
-  const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
-  URL.revokeObjectURL = function revokeObjectURL(url) {
-    return originalRevokeObjectURL(url);
-  };
-
   // WhatsApp's Download action commonly creates an anchor only for the final
   // decrypted file. During an exporter-owned capture window, consume that URL
   // into the bridge instead of starting a second, unrelated browser download.

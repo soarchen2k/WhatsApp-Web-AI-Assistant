@@ -76,14 +76,6 @@
     "message": "Synchronization stopped. $COUNT$ cached messages were kept.",
     "placeholders": { "count": { "content": "$1" } }
   },
-  "notifyLoadingProgress": {
-    "message": "Loading... $COUNT$ messages found",
-    "placeholders": { "count": { "content": "$1" } }
-  },
-  "notifyLoadedMessages": {
-    "message": "Loaded $COUNT$ messages from conversation",
-    "placeholders": { "count": { "content": "$1" } }
-  },
   "notifyLoadedHistoryDone": {
     "message": "Loaded $COUNT$ messages. Cache updated with full conversation history.",
     "placeholders": { "count": { "content": "$1" } }
@@ -153,8 +145,6 @@
   "exportHtmlDetail": { "message": "Images and videos · Opens offline in a browser" },
   "exportWordTitle": { "message": "Word document" },
   "exportWordDetail": { "message": "Images only · Best for editing and printing" },
-  "btnExportHtml": { "message": "HTML Archive (images + videos)" },
-  "btnExportWord": { "message": "Word Document (images only)" },
   "btnCancel": { "message": "Cancel" },
   "notifyPreparingMedia": { "message": "Preparing media files for export..." },
   "htmlVideoProgress": {

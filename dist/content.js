@@ -20955,7 +20955,6 @@
     const WORD_IMAGE_MAX_DIMENSION = 1280;
     class WhatsAppAI {
       constructor() {
-        this.messages = [];
         this.apiKey = "";
         this.systemInstructions = "";
         this.aiProvider = "gemini";
@@ -22523,16 +22522,7 @@
           this.showNotification(t("errorClearCache"), "error");
         }
       }
-      formatConversationForAI(messages, instructionsOrIsExport = false, messageInstructions = "") {
-        let isExport = false;
-        let instructions = "";
-        if (typeof instructionsOrIsExport === "boolean") {
-          isExport = instructionsOrIsExport;
-          instructions = messageInstructions;
-        } else {
-          instructions = instructionsOrIsExport || "";
-          isExport = false;
-        }
+      formatConversationForAI(messages, instructions = "") {
         const messageCount = messages.length;
         let conversation = `WhatsApp Conversation Export (${messageCount} messages):
 `;
@@ -22547,32 +22537,22 @@
         const lastMessage = messages[messageCount - 1];
         conversation += `Conversation timeframe: ${firstMessage.timestamp} to ${lastMessage.timestamp}
 `;
-        if (isExport) {
-          conversation += `All messages (${messageCount} total):
+        conversation += `Recent messages (showing ${Math.min(100, messageCount)} most recent):
 
 `;
-          messages.forEach((msg) => {
-            conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}
+        const messagesToShow = messages.slice(-100);
+        messagesToShow.forEach((msg) => {
+          conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}
 `;
-          });
-        } else {
-          conversation += `Recent messages (showing ${Math.min(100, messageCount)} most recent):
-
-`;
-          const messagesToShow = messages.slice(-100);
-          messagesToShow.forEach((msg) => {
-            conversation += `[${msg.timestamp}] ${msg.sender}: ${msg.text}
-`;
-          });
-          if (instructions && instructions.trim() !== "") {
-            conversation += `
+        });
+        if (instructions && instructions.trim() !== "") {
+          conversation += `
 --- Instructions for next message ---
 `;
-            conversation += `${instructions.trim()}
+          conversation += `${instructions.trim()}
 `;
-            conversation += `--- End instructions ---
+          conversation += `--- End instructions ---
 `;
-          }
         }
         return conversation;
       }
