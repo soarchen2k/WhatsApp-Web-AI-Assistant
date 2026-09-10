@@ -15,7 +15,7 @@
 
 ## 安装方法
 
-1. **下载或克隆**本仓库到本地。仓库已提交 `dist/`，可以直接加载；修改源码后必须先运行 `npm install` 和 `npm run build`
+1. **下载或克隆**本仓库到本地。先运行 `npm install` 和 `npm run build` 生成 `dist/` 目录，再加载扩展
 2. 打开 **Chrome**，进入 `chrome://extensions/`
 3. 打开右上角的 **开发者模式**
 4. 点击 **"加载已解压的扩展程序"**，选择本插件所在文件夹
@@ -131,7 +131,7 @@ whatsapp-web-ai/
 ├── manifest.json          # 插件配置文件
 ├── content.js             # WhatsApp 集成与界面的源码
 ├── media-hook.js          # 用于捕获解密视频 Blob 的受限 MAIN world 桥
-├── dist/content.js        # manifest 实际加载的构建产物
+├── dist/content.js        # manifest 实际加载的构建产物（由 `npm run build` 生成，不入库）
 ├── scripts/               # 构建、打包和媒体桥测试脚本
 ├── src/cache-policy.mjs   # 纯函数缓存配额与淘汰策略
 ├── styles.css             # 界面样式
