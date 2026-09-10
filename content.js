@@ -636,6 +636,11 @@ class WhatsAppAI {
     }, 1000);
   }
 
+  // TODO(ai-reply): The "Generate AI Response" menu entry is temporarily
+  // disabled. generateResponse(), displayAIResponse() and
+  // insertResponseIntoChat() below are kept intact for future development.
+  // Re-introduce the button (and its click listener) once auto-reply is
+  // hardened against prompt injection and gets an explicit send confirmation.
   setupUI() {
     // Check if UI is already setup
     if (document.getElementById('whatsapp-ai-fab')) {
@@ -661,7 +666,6 @@ class WhatsAppAI {
         <div class="ai-menu" id="ai-menu" style="display: none;">
           <div class="history-sync-status" id="history-sync-status" hidden></div>
           <button id="export-conversation">${t('menuExport')}</button>
-          <button id="generate-response">${t('menuGenerate')}</button>
           <button id="load-full-history">${t('menuLoadHistory')}</button>
           <button id="clear-cache">${t('menuClearCache')}</button>
           <button id="settings">${t('menuSettings')}</button>
@@ -672,14 +676,12 @@ class WhatsAppAI {
     try {
       const fabButton = document.querySelector('.ai-fab-button');
       const exportBtn = document.getElementById('export-conversation');
-      const generateBtn = document.getElementById('generate-response');
       const loadHistoryBtn = document.getElementById('load-full-history');
       const clearCacheBtn = document.getElementById('clear-cache');
       const settingsBtn = document.getElementById('settings');
 
       if (fabButton) fabButton.addEventListener('click', this.toggleMenu.bind(this));
       if (exportBtn) exportBtn.addEventListener('click', this.exportConversation.bind(this));
-      if (generateBtn) generateBtn.addEventListener('click', this.generateResponse.bind(this));
       if (loadHistoryBtn) loadHistoryBtn.addEventListener('click', this.loadFullHistory.bind(this));
       if (clearCacheBtn) clearCacheBtn.addEventListener('click', this.clearMessageCache.bind(this));
       if (settingsBtn) settingsBtn.addEventListener('click', this.openSettings.bind(this));
