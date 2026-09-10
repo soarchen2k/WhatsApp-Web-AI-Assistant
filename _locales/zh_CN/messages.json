@@ -401,6 +401,7 @@
   "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini 现在可以看到对话中最近最多 3 张图片作为视觉上下文" },
   "helpVersion5": { "message": "<strong>v1.4</strong> - 新增包含图片和视频的 HTML ZIP 导出，以及仅包含图片的 Word 导出" },
   "helpVersion6": { "message": "<strong>v1.6</strong> - 新增日期范围同步、范围过滤导出和本地媒体持久化缓存" },
+  "helpVersion7": { "message": "<strong>v1.6.3</strong> - AI 回复菜单入口暂时下线（自动回复功能待重构）；导出与设置功能不受影响" },
 
   "helpSupportTitle": { "message": "📞 支持" },
   "helpSupportDesc": { "message": "如遇到问题、有建议或需要贡献代码，请查阅项目文档，或在项目仓库中提交 issue。" }

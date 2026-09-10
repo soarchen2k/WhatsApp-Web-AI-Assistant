@@ -401,6 +401,7 @@
   "helpVersion4": { "message": "<strong>v1.3</strong> - Gemini can now see up to 3 recent images from the conversation as visual context" },
   "helpVersion5": { "message": "<strong>v1.4</strong> - Added HTML ZIP exports with images and videos, plus Word exports with images only" },
   "helpVersion6": { "message": "<strong>v1.6</strong> - Added date-range synchronization, filtered exports, and persistent local media caching" },
+  "helpVersion7": { "message": "<strong>v1.6.3</strong> - The AI response menu entry is temporarily disabled while auto-reply is being reworked; exports and settings are unchanged" },
 
   "helpSupportTitle": { "message": "📞 Support" },
   "helpSupportDesc": { "message": "For issues, suggestions, or contributions, please check the extension's documentation or create an issue in the project repository." }
