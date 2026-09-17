@@ -120,7 +120,10 @@ document.querySelectorAll('[data-testid="msg-container"]')
 - Message capture, caching, and formatting happen locally in your browser
 - API keys are stored on this device in Chrome local storage; browser extension storage is not encrypted, so protect access to your browser profile
 - The 50-message AI context, plus up to three recent images for Gemini, is sent only when you explicitly request an AI response
-- Message metadata is bounded in local storage; cached media uses a bounded IndexedDB cache and older entries may be evicted
+- **What is written to disk (all plaintext, unencrypted)**:
+  - Chat text is cached in Chrome `storage.local` (about 2 MB per chat, 8 MB total budget); it can be removed anytime via the floating button's "clear cache" action;
+  - Decrypted images/videos needed for exports are written to the `whatsapp-ai-export-media` IndexedDB database on the `web.whatsapp.com` origin (256 MB budget). IndexedDB is same-origin shared, so page-world scripts could in principle read it; the extension **automatically wipes the exported chat's media records as soon as each export finishes**, so nothing lingers locally;
+  - In rare cases (browser crash mid-export, blocked database upgrade) a few media records may remain; clearing the browser's "Cookies and other site data" removes them entirely.
 - No data is sent to servers other than the AI provider you select
 - Extension only works on `web.whatsapp.com` for security
 

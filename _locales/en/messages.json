@@ -112,6 +112,7 @@
     "message": "Conversation exported successfully! ($COUNT$ messages)",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyExportMediaWiped": { "message": "Export finished: decrypted media cached for this chat was wiped from local storage." },
   "notifyRangeCoverage": {
     "message": "Requested $START$ through $END$; actual messages cover $FIRST$ through $LAST$. Dates without messages do not appear in the archive.",
     "placeholders": {
@@ -393,6 +394,7 @@
   "helpPrivacyItem3": { "message": "When you request an AI response, the 50 most recent messages — plus up to 3 recent images if you're using Gemini — are sent to the selected provider; evaluate whether this fits your data compliance needs" },
   "helpPrivacyItem4": { "message": "The extension operates no data server; your selected AI provider handles requests according to its own retention and privacy policy" },
   "helpPrivacyItem5": { "message": "The extension only runs on web.whatsapp.com" },
+  "helpPrivacyItem6": { "message": "Local storage scope: chat text is cached unencrypted in Chrome local storage (about 2 MB per chat, 8 MB total), and decrypted images/videos used for exports are stored unencrypted in the web.whatsapp.com IndexedDB database \"whatsapp-ai-export-media\" (256 MB budget); the media records are wiped automatically after each export finishes, and clearing the message cache or the browser's site data removes everything" },
 
   "helpVersionHistoryTitle": { "message": "📝 Version History" },
   "helpVersion1": { "message": "<strong>v1.0</strong> - Initial release with conversation export and AI response generation" },
@@ -402,6 +404,7 @@
   "helpVersion5": { "message": "<strong>v1.4</strong> - Added HTML ZIP exports with images and videos, plus Word exports with images only" },
   "helpVersion6": { "message": "<strong>v1.6</strong> - Added date-range synchronization, filtered exports, and persistent local media caching" },
   "helpVersion7": { "message": "<strong>v1.6.3</strong> - The AI response menu entry is temporarily disabled while auto-reply is being reworked; exports and settings are unchanged" },
+  "helpVersion8": { "message": "<strong>v1.6.4</strong> - Decrypted media cached for an export is now wiped from local storage as soon as the export finishes, so nothing lingers on disk" },
 
   "helpSupportTitle": { "message": "📞 Support" },
   "helpSupportDesc": { "message": "For issues, suggestions, or contributions, please check the extension's documentation or create an issue in the project repository." }

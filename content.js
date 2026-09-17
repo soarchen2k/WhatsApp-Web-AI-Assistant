@@ -414,6 +414,32 @@ class WhatsAppAI {
     }
   }
 
+  // Privacy hygiene: exported media is decrypted content persisted in the
+  // page-origin IndexedDB, which any script in the page world could read.
+  // Wipe the exported chat's records as soon as an export finishes (success or
+  // failure) so nothing lingers on disk between sessions. The next export
+  // simply re-captures media from the live conversation.
+  async wipeExportMediaFootprint(chatId = this.chatId) {
+    try {
+      this.videoBlobCache.clear();
+      this.historyVideoCaptureAttempts.clear();
+      await this.clearPersistentMediaForChat(chatId);
+      // Drop dangling references so the plaintext message cache does not keep
+      // pointers to records that no longer exist.
+      let stripped = false;
+      for (const message of this.messageCache.values()) {
+        if (Array.isArray(message.mediaRefs) && message.mediaRefs.length > 0) {
+          message.mediaRefs = [];
+          stripped = true;
+        }
+      }
+      if (stripped) this.scheduleCacheSave();
+      this.showNotification(t('notifyExportMediaWiped'), 'info');
+    } catch (error) {
+      console.warn('Post-export media cleanup failed:', error);
+    }
+  }
+
   async loadCachedMessages(chatId) {
     try {
       const cacheKey = this.getCacheKey(chatId);
@@ -2052,9 +2078,11 @@ class WhatsAppAI {
   }
 
   async exportConversation() {
+    let exportStarted = false;
     try {
       const selection = await this.showExportFormatDialog();
       if (!selection) return;
+      exportStarted = true;
 
       if (selection.range) {
         const activeSync = this.historySync?.active ? this.historySync.promise : null;
@@ -2106,6 +2134,11 @@ class WhatsAppAI {
       this.clearExportProgress();
       const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
       this.showNotification(`${t('errorExport')}${detail}`, 'error');
+    } finally {
+      // Whether the export succeeded or failed, the decrypted media persisted
+      // for it must not stay on disk. A cancelled dialog skips this on purpose:
+      // nothing was exported, so the warm media cache stays useful.
+      if (exportStarted) await this.wipeExportMediaFootprint();
     }
   }
 

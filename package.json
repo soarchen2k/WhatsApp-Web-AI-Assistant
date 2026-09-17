@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-web-ai",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "description": "Chrome extension for exporting WhatsApp conversations and generating AI responses",
   "main": "content.js",
   "scripts": {

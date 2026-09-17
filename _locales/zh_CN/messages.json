@@ -112,6 +112,7 @@
     "message": "对话导出成功！（共 $COUNT$ 条消息）",
     "placeholders": { "count": { "content": "$1" } }
   },
+  "notifyExportMediaWiped": { "message": "导出完成：已清除本聊天在本地缓存的解密媒体。" },
   "notifyRangeCoverage": {
     "message": "所选范围为 $START$ 至 $END$；实际消息覆盖 $FIRST$ 至 $LAST$。没有消息的日期不会出现在归档中。",
     "placeholders": {
@@ -393,6 +394,7 @@
   "helpPrivacyItem3": { "message": "生成 AI 回复时，最近 50 条消息——使用 Gemini 时还包括最近最多 3 张图片——会被发送给所选服务商，请提前评估数据合规要求" },
   "helpPrivacyItem4": { "message": "本插件不运营数据服务器；所选 AI 服务商会按照其自身的数据保留与隐私政策处理请求" },
   "helpPrivacyItem5": { "message": "插件仅在 web.whatsapp.com 上生效" },
+  "helpPrivacyItem6": { "message": "本地落盘范围：聊天文本以明文缓存在 Chrome 本地存储（每聊天约 2MB、总量约 8MB）；导出所需的解密图片/视频会以明文写入 web.whatsapp.com 源的 IndexedDB 数据库 \"whatsapp-ai-export-media\"（预算 256MB）；媒体记录会在每次导出结束后自动清除，使用\"清除缓存\"或浏览器站点数据清理可删除全部本地数据" },
 
   "helpVersionHistoryTitle": { "message": "📝 版本历史" },
   "helpVersion1": { "message": "<strong>v1.0</strong> - 首个版本，支持对话导出与 AI 回复生成" },
@@ -402,6 +404,7 @@
   "helpVersion5": { "message": "<strong>v1.4</strong> - 新增包含图片和视频的 HTML ZIP 导出，以及仅包含图片的 Word 导出" },
   "helpVersion6": { "message": "<strong>v1.6</strong> - 新增日期范围同步、范围过滤导出和本地媒体持久化缓存" },
   "helpVersion7": { "message": "<strong>v1.6.3</strong> - AI 回复菜单入口暂时下线（自动回复功能待重构）；导出与设置功能不受影响" },
+  "helpVersion8": { "message": "<strong>v1.6.4</strong> - 导出结束后立即清除本次缓存的解密媒体，减少本地落盘驻留" },
 
   "helpSupportTitle": { "message": "📞 支持" },
   "helpSupportDesc": { "message": "如遇到问题、有建议或需要贡献代码，请查阅项目文档，或在项目仓库中提交 issue。" }
