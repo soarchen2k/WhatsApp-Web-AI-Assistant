@@ -18,16 +18,16 @@
     "export",
     "automation"
   ],
-  "author": "Your Name",
+  "author": "soarchen2k",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/whatsapp-web-ai.git"
+    "url": "https://github.com/soarchen2k/WhatsApp-Web-AI-Assistant.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/whatsapp-web-ai/issues"
+    "url": "https://github.com/soarchen2k/WhatsApp-Web-AI-Assistant/issues"
   },
-  "homepage": "https://github.com/yourusername/whatsapp-web-ai#readme",
+  "homepage": "https://github.com/soarchen2k/WhatsApp-Web-AI-Assistant#readme",
   "devDependencies": {
     "@types/chrome": "^0.2.2",
     "esbuild": "^0.28.2"
